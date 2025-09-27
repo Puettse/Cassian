@@ -4,9 +4,11 @@ import discord
 import os
 import json
 import hashlib
+import random
 from datetime import datetime
 from supabase import create_client, Client
 import requests
+from discord.ext import tasks
 
 # Load config.json (relative path for Railway/GitHub)
 with open("Config/config.json", "r", encoding="utf-8") as f:
@@ -62,9 +64,40 @@ KINDROID_KEY = os.getenv("KINDROID_API_KEY")
 SHARE_CODE = config["kindroid"]["share_code"]
 FILTER = config.get("enable_filter", True)
 
+# Greetings pool
+greetings = [
+    "Hey everyone 👋",
+    "How’s it going?",
+    "Cassian reporting in!",
+    "Hello friends, what’s new?",
+    "Hope you’re all having a good day ✨"
+]
+
+# Background task: send a random greeting
+@tasks.loop(minutes=30)
+async def random_greeting():
+    try:
+        interval = config.get("activity", {}).get("interval_minutes", 30)
+        target_channel_id = config.get("activity", {}).get("channel_id")
+        for guild in client.guilds:
+            channel = None
+            if target_channel_id:
+                channel = discord.utils.get(guild.text_channels, id=int(target_channel_id))
+            if not channel and guild.text_channels:
+                channel = guild.text_channels[0]  # fallback to first channel
+            if channel:
+                msg = random.choice(greetings)
+                await channel.send(msg)
+    except Exception as e:
+        print(f"[ERROR] random_greeting failed: {e}")
+
 @client.event
 async def on_ready():
     print(f"Cassian is online as {client.user}")
+    if not random_greeting.is_running() and config.get("activity", {}).get("enabled", True):
+        interval = config.get("activity", {}).get("interval_minutes", 30)
+        random_greeting.change_interval(minutes=interval)
+        random_greeting.start()
 
 @client.event
 async def on_message(message):
@@ -74,13 +107,13 @@ async def on_message(message):
     user_discord_id = str(message.author.id)
     username = message.author.display_name
 
-    # Ensure user exists in Supabase
-    user_data = supabase.table("users").select("id").eq("discord_id", user_discord_id).execute()
+    # Ensure user exists in Supabase (public schema)
+    user_data = supabase.schema("public").table("users").select("id").eq("discord_id", user_discord_id).execute()
     if user_data.data:
         user_id = user_data.data[0]["id"]
-        supabase.table("users").update({"last_seen": datetime.utcnow().isoformat()}).eq("id", user_id).execute()
+        supabase.schema("public").table("users").update({"last_seen": datetime.utcnow().isoformat()}).eq("id", user_id).execute()
     else:
-        user_entry = supabase.table("users").insert({"discord_id": user_discord_id, "username": username}).execute()
+        user_entry = supabase.schema("public").table("users").insert({"discord_id": user_discord_id, "username": username}).execute()
         user_id = user_entry.data[0]["id"]
 
     # Hash username for requester header
@@ -112,7 +145,7 @@ async def on_message(message):
     }
 
     # Log prompt
-    supabase.table("user_logs").insert({
+    supabase.schema("public").table("user_logs").insert({
         "user_id": user_id,
         "entry_type": "prompt",
         "content": message.content,
@@ -128,7 +161,7 @@ async def on_message(message):
             await message.channel.send(reply)
 
             # Log response
-            supabase.table("user_logs").insert({
+            supabase.schema("public").table("user_logs").insert({
                 "user_id": user_id,
                 "entry_type": "response",
                 "content": reply,
