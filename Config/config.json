@@ -1,0 +1,44 @@
+{
+  "bot_name": "Cassian",
+
+  "enable_filter": true,
+  "enable_backstory": true,
+  "enable_memories": true,
+  "enable_directives": true,
+  "enable_examples": true,
+
+  "paths": {
+    "env": "C:\\Users\\sethp\\Desktop\\Cassian\\Security\\cassian.env",
+    "directives": "C:\\Users\\sethp\\Desktop\\Cassian\\Response Directives\\directives.txt",
+    "memories": "C:\\Users\\sethp\\Desktop\\Cassian\\Key Memories\\memories.txt",
+    "backstory": "C:\\Users\\sethp\\Desktop\\Cassian\\Backstory\\backstory.txt",
+    "examples": "C:\\Users\\sethp\\Desktop\\Cassian\\Example Messages\\example.txt"
+  },
+
+  "kindroid": {
+    "api_url": "https://api.kindroid.ai/v1",
+    "share_code": "7yktf1Zccmhc6QYe4PZ8"
+  },
+
+  "discord": {
+    "application_id": "1421575696089612428",
+    "public_key": "a24e6e4fd80d9707808f574f8babe3bf92e7d482fcbc47dfd970c4fd3b689ea2"
+  },
+
+  "supabase": {
+    "url": "https://aeypmzxqjxvsrqcnqeen.supabase.co",
+    "key_env": "SUPABASE_KEY"
+  },
+
+  "logging": {
+    "log_to_file": true,
+    "log_path": "C:\\Users\\sethp\\Desktop\\Cassian\\Logs\\",
+    "log_level": "info"
+  },
+
+  "response": {
+    "max_context_messages": 30,
+    "system_username": "System",
+    "format_blocks": true
+  }
+}

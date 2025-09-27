@@ -1,0 +1,56 @@
+# ========== Python ==========
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+*.log
+*.lock
+*.bak
+*.tmp
+*.swp
+*~
+
+# ========== Environment & Secrets ==========
+.env
+*.env
+cassian.env
+Security/
+
+# ========== Memory Layers (Do NOT expose AI data) ==========
+Backstory/
+Key Memories/
+Response Directives/
+Example Messages/
+*.txt
+
+# ========== Logs ==========
+Logs/
+*.log
+
+# ========== Supabase ==========
+.supabase/
+supabase/migrations/
+supabase/config.toml
+
+# ========== Railway ==========
+railway.json
+
+# ========== Node (if used for tools or dashboard) ==========
+node_modules/
+dist/
+build/
+npm-debug.log
+
+# ========== Editor / System ==========
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========== GitHub Artifacts ==========
+*.token
+*.pem
+*.key
