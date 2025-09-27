@@ -5,15 +5,11 @@ import os
 import json
 import hashlib
 from datetime import datetime
-from dotenv import load_dotenv
 from supabase import create_client, Client
 import requests
 
-# Load .env
-load_dotenv("C:\\Users\\sethp\\Desktop\\Cassian\\Security\\cassian.env")
-
-# Load config.json
-with open("C:\\Users\\sethp\\Desktop\\Cassian\\Config\\config.json", "r", encoding="utf-8") as f:
+# Load config.json (relative path for Railway/GitHub)
+with open("Config/config.json", "r", encoding="utf-8") as f:
     config = json.load(f)
 
 # Supabase init
