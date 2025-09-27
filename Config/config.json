@@ -8,12 +8,11 @@
   "enable_examples": true,
 
   "paths": {
-  "directives": "https://raw.githubusercontent.com/Puettse/Cassian/main/Response%20Directives/directives.txt",
-  "memories": "https://raw.githubusercontent.com/Puettse/Cassian/main/Key%20Memories/memories.txt",
-  "backstory": "https://raw.githubusercontent.com/Puettse/Cassian/main/Backstory/backstory.txt",
-  "examples": "https://raw.githubusercontent.com/Puettse/Cassian/main/Example%20Messages/example.txt"
-}
-
+    "env": "C:\\Users\\sethp\\Desktop\\Cassian\\Security\\cassian.env",
+    "directives": "https://raw.githubusercontent.com/Puettse/Cassian/main/Response%20Directives/directives.txt",
+    "memories": "https://raw.githubusercontent.com/Puettse/Cassian/main/Key%20Memories/memories.txt",
+    "backstory": "https://raw.githubusercontent.com/Puettse/Cassian/main/Backstory/backstory.txt",
+    "examples": "https://raw.githubusercontent.com/Puettse/Cassian/main/Example%20Messages/example.txt"
   },
 
   "kindroid": {
@@ -32,13 +31,13 @@
   },
 
   "logging": {
-    "log_to_file": true,
-    "log_path": "C:\\Users\\sethp\\Desktop\\Cassian\\Logs\\",
+    "log_to_file": false,
+    "log_path": "supabase",
     "log_level": "info"
   },
 
   "response": {
-    "max_context_messages": 30,
+    "max_context_messages": 150,
     "system_username": "System",
     "format_blocks": true
   }
