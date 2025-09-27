@@ -145,14 +145,14 @@ async def random_greeter():
     ]
     await bot.wait_until_ready()
     while not bot.is_closed():
-        await asyncio.sleep(1800)
+        await asyncio.sleep(1800)  # every 30 minutes
         for guild in bot.guilds:
             for channel in guild.text_channels:
                 try:
                     await channel.send(random.choice(greetings))
                     break
-            except Exception:
-                continue
+                except Exception:
+                    continue
 
 
 bot.loop.create_task(random_greeter())
@@ -299,19 +299,19 @@ async def menu(ctx):
 📖 **Cassian Command Menu**
 
 🛠️ Utility
-!ping       – Check if I’m alive
-!whoami     – Show your Discord info
+!ping         – Check if I’m alive
+!whoami       – Show your Discord info
 
 🧠 Memory
-!remember   – Save a new memory
-!showmem    – Show your last 5 memories
+!remember     – Save a new memory
+!showmem      – Show your last 5 memories
 !purge_last X – Hide your last X memories
 !purge_mem N  – Hide memory #N from your list
 
 📚 Info
-!backstory  – See my backstory
-!directives – Read my directives
-!examples   – Show example chats
+!backstory    – See my backstory
+!directives   – Read my directives
+!examples     – Show example chats
 
 🗂️ System
 !menu / !help – Show this menu
