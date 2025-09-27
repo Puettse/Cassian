@@ -3,7 +3,6 @@
 import discord
 import os
 import json
-import asyncio
 import hashlib
 from datetime import datetime
 from dotenv import load_dotenv
@@ -22,25 +21,40 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Load memory layers
+# Utility to load file from local disk or GitHub URL
 def load_file(path):
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
+        if path.startswith("http://") or path.startswith("https://"):
+            res = requests.get(path)
+            if res.status_code == 200:
+                return res.text.strip()
+            else:
+                print(f"[WARN] Failed to fetch remote file: {path} ({res.status_code})")
+                return ""
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+    except Exception as e:
+        print(f"[ERROR] Could not load file {path}: {e}")
         return ""
 
-directives = load_file(config["paths"].get("directives")) if config.get("enable_directives", True) else ""
-memories   = load_file(config["paths"].get("memories")) if config.get("enable_memories", True) else ""
-backstory  = load_file(config["paths"].get("backstory")) if config.get("enable_backstory", True) else ""
-examples   = load_file("C:\\Users\\sethp\\Desktop\\Cassian\\Example Messages\\example.txt") if config.get("enable_examples", True) else ""
+# Load memory layers dynamically
+layers = {
+    "DIRECTIVES": ("directives", "enable_directives"),
+    "MEMORIES": ("memories", "enable_memories"),
+    "BACKSTORY": ("backstory", "enable_backstory"),
+    "EXAMPLES": ("examples", "enable_examples")
+}
 
-system_message = "\n\n".join(filter(None, [
-    f"[DIRECTIVES]\n{directives}" if directives else "",
-    f"[MEMORIES]\n{memories}" if memories else "",
-    f"[BACKSTORY]\n{backstory}" if backstory else "",
-    f"[EXAMPLES]\n{examples}" if examples else ""
-]))
+memory_chunks = []
+
+for label, (path_key, toggle_key) in layers.items():
+    if config.get(toggle_key, False) and config["paths"].get(path_key):
+        content = load_file(config["paths"][path_key])
+        if content:
+            memory_chunks.append(f"[{label}]\n{content}")
+
+system_message = "\n\n".join(memory_chunks)
 
 # Discord setup
 intents = discord.Intents.default()
@@ -64,17 +78,19 @@ async def on_message(message):
     user_discord_id = str(message.author.id)
     username = message.author.display_name
 
-    # Insert or update user in Supabase
+    # Ensure user exists in Supabase
     user_data = supabase.table("users").select("id").eq("discord_id", user_discord_id).execute()
     if user_data.data:
-        user_id = user_data.data[0]['id']
+        user_id = user_data.data[0]["id"]
         supabase.table("users").update({"last_seen": datetime.utcnow().isoformat()}).eq("id", user_id).execute()
     else:
         user_entry = supabase.table("users").insert({"discord_id": user_discord_id, "username": username}).execute()
-        user_id = user_entry.data[0]['id']
+        user_id = user_entry.data[0]["id"]
 
-    # Prepare conversation payload
+    # Hash username for requester header
     hashed_username = hashlib.sha256(username.encode()).hexdigest()[:32]
+
+    # Build conversation payload
     conversation = [
         {
             "username": "System",
@@ -125,9 +141,10 @@ async def on_message(message):
             }).execute()
         else:
             await message.channel.send("Cassian failed to respond.")
+            print(f"[ERROR] Kindroid API returned {res.status_code}: {res.text}")
     except Exception as e:
         await message.channel.send("Cassian encountered an error.")
-        print(e)
+        print(f"[ERROR] {e}")
 
 # Start bot
 client.run(os.getenv("DISCORD_BOT_TOKEN"))
