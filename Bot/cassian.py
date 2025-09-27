@@ -74,7 +74,8 @@ async def log_to_supabase(user_discord_id, username, entry_type, content, channe
             "entry_type": entry_type,
             "content": content,
             "channel_id": channel_id,
-            "message_id": message_id
+            "message_id": message_id,
+            "visible": True if entry_type == "memory" else None
         }).execute()
     except Exception as e:
         print(f"[ERROR] Failed to log: {e}")
@@ -173,24 +174,89 @@ async def whoami(ctx):
 
 @bot.command()
 async def remember(ctx, *, memory: str):
-    await log_to_supabase(str(ctx.author.id), ctx.author.name, "memory", memory, str(ctx.channel.id), str(ctx.message.id))
-    await ctx.send(f"Got it, {ctx.author.name}. I’ll remember that.")
+    user_discord_id = str(ctx.author.id)
+    await log_to_supabase(user_discord_id, ctx.author.name, "memory", memory, str(ctx.channel.id), str(ctx.message.id))
+    await ctx.send(f"Got it, {ctx.author.name}. I’ll remember that just for you.")
 
 
 @bot.command()
 async def showmem(ctx):
-    result = supabase.schema("api").table("user_logs").select("content").eq("entry_type", "memory").limit(5).execute()
-    if result.data:
-        memories = "\n".join([m["content"] for m in result.data])
-        await ctx.send(f"Here’s what I remember:\n{memories}")
-    else:
+    user_discord_id = str(ctx.author.id)
+    user_data = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+
+    if not user_data.data:
         await ctx.send("I don’t have any memories stored for you yet.")
+        return
+
+    user_id = user_data.data[0]["id"]
+    result = supabase.schema("api").table("user_logs") \
+        .select("id, content, created_at") \
+        .eq("user_id", user_id) \
+        .eq("entry_type", "memory") \
+        .eq("visible", True) \
+        .order("created_at", desc=True) \
+        .limit(5).execute()
+
+    if result.data:
+        memories = "\n".join([f"{i+1}. {m['content']} ({m['created_at']})" for i, m in enumerate(result.data)])
+        await ctx.send(f"Here are your recent memories:\n{memories}")
+    else:
+        await ctx.send("I don’t have any visible memories stored for you yet.")
 
 
 @bot.command()
-async def forget(ctx):
-    supabase.schema("api").table("user_logs").delete().eq("entry_type", "memory").execute()
-    await ctx.send("All your memories have been cleared.")
+async def purge_last(ctx, number: int):
+    user_discord_id = str(ctx.author.id)
+    user_data = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+
+    if not user_data.data:
+        await ctx.send("No memories found for you.")
+        return
+
+    user_id = user_data.data[0]["id"]
+    memories = supabase.schema("api").table("user_logs") \
+        .select("id") \
+        .eq("user_id", user_id) \
+        .eq("entry_type", "memory") \
+        .eq("visible", True) \
+        .order("created_at", desc=True) \
+        .limit(number).execute()
+
+    if not memories.data:
+        await ctx.send("No visible memories to purge.")
+        return
+
+    ids_to_hide = [m["id"] for m in memories.data]
+    supabase.schema("api").table("user_logs").update({"visible": False}).in_("id", ids_to_hide).execute()
+
+    await ctx.send(f"Purged last {len(ids_to_hide)} memories from your view.")
+
+
+@bot.command()
+async def purge_mem(ctx, index: int):
+    user_discord_id = str(ctx.author.id)
+    user_data = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+
+    if not user_data.data:
+        await ctx.send("No memories found for you.")
+        return
+
+    user_id = user_data.data[0]["id"]
+    memories = supabase.schema("api").table("user_logs") \
+        .select("id, content") \
+        .eq("user_id", user_id) \
+        .eq("entry_type", "memory") \
+        .eq("visible", True) \
+        .order("created_at", desc=True).execute()
+
+    if index < 1 or index > len(memories.data):
+        await ctx.send("Invalid memory index.")
+        return
+
+    target_id = memories.data[index - 1]["id"]
+    supabase.schema("api").table("user_logs").update({"visible": False}).eq("id", target_id).execute()
+
+    await ctx.send(f"Purged memory #{index} from your view.")
 
 
 @bot.command()
@@ -239,7 +305,8 @@ async def menu(ctx):
 🧠 Memory
 !remember   – Save a new memory
 !showmem    – Show your last 5 memories
-!forget     – Wipe your memories
+!purge_last X – Hide your last X memories
+!purge_mem N  – Hide memory #N from your list
 
 📚 Info
 !backstory  – See my backstory
