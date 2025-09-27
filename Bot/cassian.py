@@ -40,7 +40,6 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 start_time = time.time()  # for uptime
 
-
 # -----------------------
 # Utility functions
 # -----------------------
