@@ -1,16 +1,18 @@
 import os
-import discord
+import time
+import random
+import hashlib
+from datetime import datetime
+
 import aiohttp
 import asyncio
-import random
-import time
-from datetime import datetime
-from supabase import create_client, Client
-from discord.ext import commands
+import discord
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
-# ========= Environment =========
-load_dotenv()  # harmless on Railway; useful locally
+# ========== ENV ==========
+load_dotenv()  # harmless on Railway, useful locally
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 
@@ -20,13 +22,13 @@ KINDROID_KEY = os.getenv("KINDROID_API_KEY")
 AI_ID = os.getenv("SHARED_AI_CODE_1")
 ENABLE_FILTER = os.getenv("ENABLE_FILTER_1", "true").lower() == "true"
 
-# Supabase (use service role key; our Railway var name is SUPABASE_KEY)
+# Supabase (we use your Railway var name: SUPABASE_KEY == service_role)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # <-- IMPORTANT: consistent with your Railway vars
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Remote memory files (now public)
+# Remote memory files (public GitHub raw links)
 MEMORY_URLS = {
     "directives": "https://raw.githubusercontent.com/Puettse/Cassian/main/Response%20Directives/directives.txt",
     "memories":   "https://raw.githubusercontent.com/Puettse/Cassian/main/Key%20Memories/memories.txt",
@@ -34,21 +36,21 @@ MEMORY_URLS = {
     "examples":   "https://raw.githubusercontent.com/Puettse/Cassian/main/Example%20Messages/example.txt",
 }
 
-# Discord
+# ========== DISCORD ==========
 intents = discord.Intents.default()
 intents.guilds = True
 intents.messages = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
 
+bot = commands.Bot(command_prefix="!", intents=intents)
 start_time = time.time()
 SYSTEM_MESSAGE = ""  # populated on_ready()
 
 
-# ========= Utilities =========
+# ========== UTILITIES ==========
 
 async def http_get_text(url: str) -> str:
-    """Fetch text from a URL (used for GitHub raw memory layers)."""
+    """Fetch text from URL; return '' on failure (non-fatal)."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=20) as resp:
@@ -61,31 +63,49 @@ async def http_get_text(url: str) -> str:
         return ""
 
 async def build_system_message() -> str:
-    """Assemble the composite system prompt from all 4 memory layers."""
+    """Assemble composite system prompt from memory layers."""
     directives = await http_get_text(MEMORY_URLS["directives"])
     memories   = await http_get_text(MEMORY_URLS["memories"])
     backstory  = await http_get_text(MEMORY_URLS["backstory"])
     examples   = await http_get_text(MEMORY_URLS["examples"])
 
     parts = []
-    if directives: parts.append(f"[DIRECTIVES]\n{directives.strip()}")
-    if memories:   parts.append(f"[MEMORIES]\n{memories.strip()}")
-    if backstory:  parts.append(f"[BACKSTORY]\n{backstory.strip()}")
-    if examples:   parts.append(f"[EXAMPLES]\n{examples.strip()}")
+    if directives.strip():
+        parts.append(f"[DIRECTIVES]\n{directives.strip()}")
+    if memories.strip():
+        parts.append(f"[MEMORIES]\n{memories.strip()}")
+    if backstory.strip():
+        parts.append(f"[BACKSTORY]\n{backstory.strip()}")
+    if examples.strip():
+        parts.append(f"[EXAMPLES]\n{examples.strip()}")
 
     return "\n\n".join(parts).strip()
 
-async def ensure_user_and_log(user_discord_id: str, username: str, entry_type: str,
-                              content: str, channel_id: str | None, message_id: str | None,
-                              visible: bool | None = None):
-    """Ensure user row exists in api.users, then insert a row into api.user_logs."""
+async def ensure_user_and_log(
+    user_discord_id: str,
+    username: str,
+    entry_type: str,
+    content: str,
+    channel_id: str | None,
+    message_id: str | None,
+    visible: bool | None = None,
+):
+    """Ensure user exists in api.users; insert row into api.user_logs."""
     try:
-        ures = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+        ures = (
+            supabase.schema("api")
+            .table("users")
+            .select("id")
+            .eq("discord_id", user_discord_id)
+            .execute()
+        )
         if not ures.data:
-            ins = supabase.schema("api").table("users").insert({
-                "discord_id": user_discord_id,
-                "username": username
-            }).execute()
+            ins = (
+                supabase.schema("api")
+                .table("users")
+                .insert({"discord_id": user_discord_id, "username": username})
+                .execute()
+            )
             user_id = ins.data[0]["id"]
         else:
             user_id = ures.data[0]["id"]
@@ -95,9 +115,9 @@ async def ensure_user_and_log(user_discord_id: str, username: str, entry_type: s
             "entry_type": entry_type,
             "content": content,
             "channel_id": channel_id,
-            "message_id": message_id
+            "message_id": message_id,
         }
-        # Only include `visible` field for memory entries; leave it out for others.
+        # Only set visible for memory entries; omit otherwise to keep column NULL
         if entry_type == "memory":
             payload["visible"] = True if visible is None else visible
 
@@ -107,31 +127,35 @@ async def ensure_user_and_log(user_discord_id: str, username: str, entry_type: s
         print(f"[ERROR] Failed to log to Supabase: {e}")
         return None
 
-async def call_kindroid(conversation: list[dict], requester_token: str) -> str:
-    """Call Kindroid /discord-bot endpoint with a conversation array and return text."""
+async def call_kindroid(conversation: list[dict], requester_hint: str) -> str:
+    """Call Kindroid /discord-bot; treat response as text."""
+    # Hash requester to alphanumeric token per Kindroid guidance
+    requester = hashlib.sha256(requester_hint.encode("utf-8")).hexdigest()[:32]
+
     headers = {
         "Authorization": f"Bearer {KINDROID_KEY}",
         "Content-Type": "application/json",
-        "X-Kindroid-Requester": requester_token[:32]  # simple limiter
+        "X-Kindroid-Requester": requester,
     }
     payload = {
         "share_code": AI_ID,
         "enable_filter": ENABLE_FILTER,
-        "conversation": conversation
+        "conversation": conversation,
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(f"{KINDROID_URL}/discord-bot", headers=headers, json=payload, timeout=60) as resp:
-                # Kindroid doc says 200 OK with response; treat body as text to be safe
-                txt = await resp.text()
+            async with session.post(
+                f"{KINDROID_URL}/discord-bot", headers=headers, json=payload, timeout=90
+            ) as resp:
+                text = await resp.text()
                 if resp.status == 200:
-                    return txt.strip() if txt.strip() else "..."
-                return f"[Kindroid error {resp.status}] {txt[:400]}"
+                    return text.strip() if text.strip() else "..."
+                return f"[Kindroid error {resp.status}] {text[:400]}"
     except Exception as e:
         return f"[Kindroid ERROR: {e}]"
 
 
-# ========= Events =========
+# ========== EVENTS ==========
 
 @bot.event
 async def on_ready():
@@ -143,11 +167,10 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Ignore self
     if message.author == bot.user:
         return
 
-    # Independent reply when mentioned
+    # Independent replies when mentioned
     if bot.user.mentioned_in(message):
         user_discord_id = str(message.author.id)
         username = message.author.name
@@ -159,7 +182,6 @@ async def on_message(message: discord.Message):
             str(message.channel.id), str(message.id)
         )
 
-        # Build conversation with our system layer
         conversation = []
         if SYSTEM_MESSAGE:
             conversation.append({
@@ -173,7 +195,7 @@ async def on_message(message: discord.Message):
             "timestamp": ts
         })
 
-        reply = await call_kindroid(conversation, requester_token=username)
+        reply = await call_kindroid(conversation, requester_hint=username)
         await message.channel.send(reply)
 
         await ensure_user_and_log(
@@ -181,13 +203,13 @@ async def on_message(message: discord.Message):
             str(message.channel.id), None
         )
 
-    # Let commands still work
+    # Allow commands to run
     await bot.process_commands(message)
 
 
-# ========= Background: random greeter =========
+# ========== BACKGROUND GREETER ==========
 
-@discord.ext.tasks.loop(minutes=30)
+@tasks.loop(minutes=30)
 async def random_greeter():
     greetings = [
         "Hey everyone, Cassian here.",
@@ -196,20 +218,24 @@ async def random_greeter():
         "Cassian checking in.",
         "What’s everyone up to?",
         "I’ve been watching — who wants to chat?",
-        "Sometimes silence feels heavy. Thought I’d speak up."
+        "Sometimes silence feels heavy. Thought I’d speak up.",
     ]
+    # one message per guild per tick
+    for guild in bot.guilds:
+        for channel in getattr(guild, "text_channels", []):
+            try:
+                await channel.send(random.choice(greetings))
+                break
+            except Exception as e:
+                print(f"[WARN] random_greeter failed in {getattr(channel, 'id', '?')}: {e}")
+                continue
+
+@random_greeter.before_loop
+async def _greeter_ready():
     await bot.wait_until_ready()
-    try:
-        for guild in bot.guilds:
-            for channel in guild.text_channels:
-                try:
-                    await channel.send(random.choice(greetings))
-                    break  # one channel per guild per tick
-    except Exception as e:
-        print(f"[WARN] random_greeter: {e}")
 
 
-# ========= Commands =========
+# ========== COMMANDS ==========
 
 @bot.command()
 async def ping(ctx: commands.Context):
@@ -219,11 +245,11 @@ async def ping(ctx: commands.Context):
 async def whoami(ctx: commands.Context):
     await ctx.send(f"You are {ctx.author.name} (Discord ID: {ctx.author.id}).")
 
-# ---- Memories (per-user, soft delete) ----
+# ---- Memories: per-user + soft delete (visible=false) ----
 
 @bot.command()
 async def remember(ctx: commands.Context, *, memory: str):
-    """Save a private memory (visible only to the user)."""
+    """Save a private memory tied to you."""
     await ensure_user_and_log(
         str(ctx.author.id), ctx.author.name, "memory", memory,
         str(ctx.channel.id), str(ctx.message.id), visible=True
@@ -232,23 +258,30 @@ async def remember(ctx: commands.Context, *, memory: str):
 
 @bot.command()
 async def showmem(ctx: commands.Context):
-    """Show last 5 visible memories for the invoking user."""
+    """Show your last 5 visible memories."""
     user_discord_id = str(ctx.author.id)
-    ures = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+    ures = (
+        supabase.schema("api")
+        .table("users")
+        .select("id")
+        .eq("discord_id", user_discord_id)
+        .execute()
+    )
     if not ures.data:
         await ctx.send("I don’t have any memories stored for you yet.")
         return
+
     user_id = ures.data[0]["id"]
-
-    q = (supabase.schema("api").table("user_logs")
-         .select("id, content, created_at")
-         .eq("user_id", user_id)
-         .eq("entry_type", "memory")
-         .eq("visible", True)
-         .order("created_at", desc=True)
-         .limit(5)
-         .execute())
-
+    q = (
+        supabase.schema("api").table("user_logs")
+        .select("id, content, created_at")
+        .eq("user_id", user_id)
+        .eq("entry_type", "memory")
+        .eq("visible", True)
+        .order("created_at", desc=True)
+        .limit(5)
+        .execute()
+    )
     if q.data:
         lines = [f"{i+1}. {row['content']} ({row['created_at']})" for i, row in enumerate(q.data)]
         await ctx.send("Here are your recent memories:\n" + "\n".join(lines))
@@ -257,52 +290,64 @@ async def showmem(ctx: commands.Context):
 
 @bot.command()
 async def purge_last(ctx: commands.Context, number: int):
-    """Hide (soft-delete) the last X visible memories for the user."""
+    """Hide (soft-delete) your last X memories."""
     user_discord_id = str(ctx.author.id)
-    ures = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+    ures = (
+        supabase.schema("api")
+        .table("users").select("id")
+        .eq("discord_id", user_discord_id).execute()
+    )
     if not ures.data:
         await ctx.send("No memories found for you.")
         return
-    user_id = ures.data[0]["id"]
 
-    q = (supabase.schema("api").table("user_logs")
-         .select("id")
-         .eq("user_id", user_id)
-         .eq("entry_type", "memory")
-         .eq("visible", True)
-         .order("created_at", desc=True)
-         .limit(number)
-         .execute())
+    user_id = ures.data[0]["id"]
+    q = (
+        supabase.schema("api").table("user_logs")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("entry_type", "memory")
+        .eq("visible", True)
+        .order("created_at", desc=True)
+        .limit(number)
+        .execute()
+    )
     if not q.data:
         await ctx.send("No visible memories to purge.")
         return
 
-    ids = [r["id"] for r in q.data]
+    ids = [row["id"] for row in q.data]
     supabase.schema("api").table("user_logs").update({"visible": False}).in_("id", ids).execute()
     await ctx.send(f"Purged last {len(ids)} memories from your view.")
 
 @bot.command()
 async def purge_mem(ctx: commands.Context, index: int):
-    """Hide (soft-delete) memory #N from the user's visible list."""
+    """Hide (soft-delete) memory #N from your visible list."""
     user_discord_id = str(ctx.author.id)
-    ures = supabase.schema("api").table("users").select("id").eq("discord_id", user_discord_id).execute()
+    ures = (
+        supabase.schema("api")
+        .table("users").select("id")
+        .eq("discord_id", user_discord_id).execute()
+    )
     if not ures.data:
         await ctx.send("No memories found for you.")
         return
-    user_id = ures.data[0]["id"]
 
-    allq = (supabase.schema("api").table("user_logs")
-            .select("id, content")
-            .eq("user_id", user_id)
-            .eq("entry_type", "memory")
-            .eq("visible", True)
-            .order("created_at", desc=True)
-            .execute())
-    if not allq.data or index < 1 or index > len(allq.data):
+    user_id = ures.data[0]["id"]
+    q = (
+        supabase.schema("api").table("user_logs")
+        .select("id, content")
+        .eq("user_id", user_id)
+        .eq("entry_type", "memory")
+        .eq("visible", True)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    if not q.data or index < 1 or index > len(q.data):
         await ctx.send("Invalid memory index.")
         return
 
-    target_id = allq.data[index - 1]["id"]
+    target_id = q.data[index - 1]["id"]
     supabase.schema("api").table("user_logs").update({"visible": False}).eq("id", target_id).execute()
     await ctx.send(f"Purged memory #{index} from your view.")
 
@@ -329,9 +374,7 @@ async def examples(ctx: commands.Context):
 async def stats(ctx: commands.Context):
     users = supabase.schema("api").table("users").select("id", count="exact").execute()
     logs  = supabase.schema("api").table("user_logs").select("id", count="exact").execute()
-    user_count = users.count or 0
-    log_count  = logs.count or 0
-    await ctx.send(f"📊 Cassian Stats:\nUsers: {user_count}\nLogs: {log_count}")
+    await ctx.send(f"📊 Cassian Stats:\nUsers: {users.count or 0}\nLogs: {logs.count or 0}")
 
 @bot.command()
 async def uptime(ctx: commands.Context):
@@ -350,7 +393,7 @@ async def menu(ctx: commands.Context):
 !ping          – Check if I’m alive
 !whoami        – Show your Discord info
 
-🧠 Memory (private to you; soft-delete on purge)
+🧠 Memory (private; audit preserved)
 !remember <t>  – Save a new memory
 !showmem       – Show your last 5 memories
 !purge_last X  – Hide your last X memories
@@ -368,5 +411,5 @@ async def menu(ctx: commands.Context):
 """
     )
 
-# ========= Run =========
+# ========== RUN ==========
 bot.run(DISCORD_TOKEN)
