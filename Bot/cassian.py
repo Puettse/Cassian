@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import aiohttp
 import asyncio
 import discord
+import json
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from supabase import create_client, Client
