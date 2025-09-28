@@ -19,7 +19,7 @@ DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 # Kindroid
 KINDROID_URL = os.getenv("KINDROID_INFER_URL", "https://api.kindroid.ai/v1")
 KINDROID_KEY = os.getenv("KINDROID_API_KEY")
-AI_ID = os.getenv("SHARED_AI_CODE_1")
+AI_ID = os.getenv("SHARED_AI_CODE_1", "").strip()
 ENABLE_FILTER = os.getenv("ENABLE_FILTER_1", "true").lower() == "true"
 
 # Supabase
@@ -118,10 +118,10 @@ async def call_kindroid(conversation: list[dict], requester_hint: str) -> str:
         "X-Kindroid-Requester": requester,
     }
     payload = {
-        "share_code": AI_ID,
-        "enable_filter": ENABLE_FILTER,
-        "conversation": conversation,
-    }
+    "share_code": AI_ID or "",
+    "enable_filter": ENABLE_FILTER,
+    "conversation": conversation,
+}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{KINDROID_URL}/discord-bot", headers=headers, json=payload, timeout=90) as resp:
