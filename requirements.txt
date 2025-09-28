@@ -1,4 +1,5 @@
 discord.py
 supabase
+aiohttp
 python-dotenv
-requests
+
