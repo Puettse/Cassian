@@ -2,7 +2,7 @@ import os
 import time
 import random
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiohttp
 import asyncio
@@ -158,7 +158,7 @@ async def on_message(message: discord.Message):
 
         conversation = []
         if SYSTEM_MESSAGE:
-            conversation.append({"username": "System", "text": SYSTEM_MESSAGE, "timestamp": datetime.utcnow().isoformat()})
+            conversation.append({"username": "System", "text": SYSTEM_MESSAGE, "timestamp": datetime.now(timezone.utc).isoformat()})
         conversation.append({"username": username, "text": prompt_text, "timestamp": ts})
 
         reply = await call_kindroid(conversation, requester_hint=username)
