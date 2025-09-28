@@ -161,7 +161,19 @@ async def on_message(message: discord.Message):
             conversation.append({"username": "System", "text": SYSTEM_MESSAGE, "timestamp": datetime.now(timezone.utc).isoformat()})
         conversation.append({"username": username, "text": prompt_text, "timestamp": ts})
 
-        reply = await call_kindroid(conversation, requester_hint=username)
+        response = await call_kindroid(conversation, requester_hint=username)
+
+try:
+    # Try to parse the Kindroid JSON response
+    data = json.loads(response)
+    reply_text = data.get("reply", "").strip()
+    if not reply_text:
+        reply_text = "[Kindroid replied with an empty message.]"
+except Exception:
+    reply_text = f"[Error parsing Kindroid response: {response}]"
+
+await message.channel.send(reply_text)
+
         await message.channel.send(reply)
 
         await ensure_user_and_log(user_discord_id, username, "response", reply, str(message.channel.id), None)
