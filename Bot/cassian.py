@@ -1,4 +1,3 @@
-import json
 import os
 import time
 import random
@@ -13,23 +12,19 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 
 # ========== ENV ==========
-load_dotenv()  # safe on Railway, useful locally
+load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-
-# Kindroid
 KINDROID_URL = os.getenv("KINDROID_INFER_URL", "https://api.kindroid.ai/v1")
 KINDROID_KEY = os.getenv("KINDROID_API_KEY")
 AI_ID = os.getenv("SHARED_AI_CODE_1", "").strip()
 ENABLE_FILTER = os.getenv("ENABLE_FILTER_1", "true").lower() == "true"
 
-# Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # service_role key
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Remote memory files
 MEMORY_URLS = {
     "directives": "https://raw.githubusercontent.com/Puettse/Cassian/main/Response%20Directives/directives.txt",
     "memories":   "https://raw.githubusercontent.com/Puettse/Cassian/main/Key%20Memories/memories.txt",
@@ -37,13 +32,11 @@ MEMORY_URLS = {
     "examples":   "https://raw.githubusercontent.com/Puettse/Cassian/main/Example%20Messages/example.txt",
 }
 
-# ========== DISCORD ==========
 intents = discord.Intents.default()
 intents.guilds = True
 intents.messages = True
 intents.message_content = True
 
-# Disable default help, so our !menu / !help works
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 start_time = time.time()
@@ -119,17 +112,15 @@ async def call_kindroid(conversation: list[dict], requester_hint: str) -> str:
         "X-Kindroid-Requester": requester,
     }
     payload = {
-    "share_code": AI_ID or "",
-    "enable_filter": ENABLE_FILTER,
-    "conversation": conversation,
-}
+        "share_code": AI_ID or "",
+        "enable_filter": ENABLE_FILTER,
+        "conversation": conversation,
+    }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(f"{KINDROID_URL}/discord-bot", headers=headers, json=payload, timeout=90) as resp:
-                text = await resp.text()
-                if resp.status == 200:
-                    return text.strip() if text.strip() else "..."
-                return f"[Kindroid error {resp.status}] {text[:400]}"
+                data = await resp.json()
+                return data.get("reply", "[ERROR] No reply received.")
     except Exception as e:
         return f"[Kindroid ERROR: {e}]"
 
@@ -162,19 +153,7 @@ async def on_message(message: discord.Message):
             conversation.append({"username": "System", "text": SYSTEM_MESSAGE, "timestamp": datetime.now(timezone.utc).isoformat()})
         conversation.append({"username": username, "text": prompt_text, "timestamp": ts})
 
-        response = await call_kindroid(conversation, requester_hint=username)
-
-try:
-    # Try to parse the Kindroid JSON response
-    data = json.loads(response)
-    reply_text = data.get("reply", "").strip()
-    if not reply_text:
-        reply_text = "[Kindroid replied with an empty message.]"
-except Exception:
-    reply_text = f"[Error parsing Kindroid response: {response}]"
-
-await message.channel.send(reply_text)
-
+        reply = await call_kindroid(conversation, requester_hint=username)
         await message.channel.send(reply)
 
         await ensure_user_and_log(user_discord_id, username, "response", reply, str(message.channel.id), None)
@@ -218,8 +197,6 @@ async def ping(ctx):
 @bot.command()
 async def whoami(ctx):
     await ctx.send(f"You are {ctx.author.name} (Discord ID: {ctx.author.id}).")
-
-# ---- Memories ----
 
 @bot.command()
 async def remember(ctx, *, memory: str):
@@ -273,8 +250,6 @@ async def purge_mem(ctx, index: int):
     supabase.schema("api").table("user_logs").update({"visible": False}).eq("id", target_id).execute()
     await ctx.send(f"Purged memory #{index} from your view.")
 
-# ---- Info ----
-
 @bot.command()
 async def backstory(ctx):
     txt = await http_get_text(MEMORY_URLS["backstory"])
@@ -289,8 +264,6 @@ async def directives(ctx):
 async def examples(ctx):
     txt = await http_get_text(MEMORY_URLS["examples"])
     await ctx.send(f"**Example Conversations**\n{txt[:1800]}" if txt else "Examples not available.")
-
-# ---- System ----
 
 @bot.command()
 async def stats(ctx):
@@ -315,23 +288,77 @@ async def menu(ctx):
 !ping          – Check if I’m alive
 !whoami        – Show your Discord info
 
-🧠 Memory (private; audit preserved)
+🧠 Memory
 !remember <t>  – Save a new memory
 !showmem       – Show your last 5 memories
 !purge_last X  – Hide your last X memories
-!purge_mem N   – Hide memory #N from your list
+!purge_mem N   – Hide memory #N
+
+🤗 Actions
+!hug           – Receive a warm hug
+!headpat       – Gentle headpats
+!kiss          – A sweet, safe kiss
+!uppies        – Picked up lovingly
+!snuggle       – Wrapped in comfort
+!tuckin        – Tucked in safe and sound
 
 📚 Info
-!backstory     – See my backstory
-!directives    – Read my directives
-!examples      – Show example chats
+!backstory     – My backstory
+!directives    – My inner logic
+!examples      – Example convos
 
 🗂️ System
 !menu / !help  – Show this menu
-!stats         – Show user/log stats
-!uptime        – How long I’ve been online
+!stats         – User/log stats
+!uptime        – Time since launch
 """
     )
+
+
+# ========== SFW ACTIONS ==========
+
+action_responses = {
+    "hug": [
+        "wraps arms around {user} in a warm, safe hug.",
+        "gently pulls {user} into a bear hug.",
+        "opens arms wide for {user} — come here, let’s hug it out.",
+    ],
+    "headpat": [
+        "places a gentle hand on {user}’s head and gives a few soft pats.",
+        "ruffles {user}’s hair affectionately.",
+        "gives {user} a reassuring pat on the head.",
+    ],
+    "kiss": [
+        "presses a soft kiss to {user}’s forehead.",
+        "gives {user} a sweet little kiss on the cheek.",
+        "leans in and leaves a gentle kiss on {user}’s brow.",
+    ],
+    "uppies": [
+        "scoops {user} up into strong arms — uppies granted!",
+        "lifts {user} gently and securely.",
+        "offers {user} a ride in my arms. Up you go!",
+    ],
+    "snuggle": [
+        "pulls {user} close into a long, comforting snuggle.",
+        "wraps around {user} like a warm blanket.",
+        "settles down beside {user} for a cozy snuggle session.",
+    ],
+    "tuckin": [
+        "fluffs the pillows and gently tucks {user} into bed.",
+        "draws the blanket up around {user} with a tender smile.",
+        "whispers goodnight as {user} gets tucked in safe and sound.",
+    ]
+}
+
+def register_action_commands(bot):
+    for action, lines in action_responses.items():
+        async def command_func(ctx, action=action, lines=lines):
+            line = random.choice(lines).replace("{user}", ctx.author.mention)
+            await ctx.send(line)
+
+        bot.command(name=action)(command_func)
+
+register_action_commands(bot)
 
 # ========== RUN ==========
 bot.run(DISCORD_TOKEN)
