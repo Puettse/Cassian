@@ -93,19 +93,24 @@ def send_to_kindroid(prompt):
         "ai_id": KINDROID_AI_ID,
         "message": prompt
     }
-    response = requests.post(url, headers=headers, json=data)
 
-if response.status_code != 200:
-    print(f"[Kindroid ERROR: {response.status_code}] {response.text[:300]}")
-    return "I’m having a small hiccup connecting to my AI core right now."
+    try:
+        response = requests.post(url, headers=headers, json=data)
 
-try:
-    result = response.json()
-    return result.get("reply", "...")
-except ValueError:
-    # Kindroid returned plain text instead of JSON
-    print(f"[Kindroid WARNING] Non‑JSON reply: {response.text[:300]}")
-    return response.text[:500] or "I couldn’t get a proper answer this time."
+        if response.status_code != 200:
+            print(f"[Kindroid ERROR: {response.status_code}] {response.text[:300]}")
+            return "I’m having a small hiccup connecting to my AI core right now."
+
+        try:
+            result = response.json()
+            return result.get("reply", "...")
+        except ValueError:
+            print(f"[Kindroid WARNING] Non‑JSON reply: {response.text[:300]}")
+            return response.text[:500] or "I couldn’t get a proper answer this time."
+
+    except Exception as e:
+        print(f"[Kindroid EXCEPTION] {e}")
+        return "The AI core failed to respond due to an unexpected error."
 
 # --------------------
 # 6. Logging
@@ -132,7 +137,7 @@ def handle_message(user_id, username, message):
     return reply
 
 # --------------------
-# Sample Run
+# 8. Sample Run
 # --------------------
 if __name__ == "__main__":
     print(handle_message("test_user_1", "Sunshine", "hi cassian... my hands are shaking again"))
