@@ -96,16 +96,16 @@ def send_to_kindroid(prompt):
     response = requests.post(url, headers=headers, json=data)
 
 if response.status_code != 200:
-    print("[Kindroid Error]", response.status_code, response.text)
-    return None
+    print(f"[Kindroid ERROR: {response.status_code}] {response.text[:300]}")
+    return "I’m having a small hiccup connecting to my AI core right now."
 
 try:
     result = response.json()
-    return result.get("reply", result)  # fallback to full object if 'reply' missing
+    return result.get("reply", "...")
 except ValueError:
-    print("[Kindroid Warning] Response not in JSON format.")
-    print("[Raw Response]", response.text)
-    return response.text  # fallback to raw response if not JSON
+    # Kindroid returned plain text instead of JSON
+    print(f"[Kindroid WARNING] Non‑JSON reply: {response.text[:300]}")
+    return response.text[:500] or "I couldn’t get a proper answer this time."
 
 # --------------------
 # 6. Logging
