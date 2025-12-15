@@ -1,5 +1,3 @@
-discord.py
-supabase
-aiohttp
-python-dotenv
+discord.py>=2.4.0
+
 
