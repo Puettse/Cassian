@@ -19,13 +19,14 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# in Feral_Kitty_FiFi/main.py
 EXTENSIONS = [
-    "feral_kitty_fifi.features.safeword",
-    "feral_kitty_fifi.features.roles_build",
-    "feral_kitty_fifi.features.reaction_panels",
-    "feral_kitty_fifi.features.member_console",
-    "feral_kitty_fifi.features.admin",
-    "feral_kitty_fifi.features.help",
+    "Feral_Kitty_FiFi.features.safeword",
+    "Feral_Kitty_FiFi.features.roles_build",
+    "Feral_Kitty_FiFi.features.reaction_panels",
+    "Feral_Kitty_FiFi.features.member_console",
+    "Feral_Kitty_FiFi.features.admin",
+    "Feral_Kitty_FiFi.features.help",
 ]
 
 @bot.event
