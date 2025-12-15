@@ -1,1 +1,8 @@
-ph
+import logging
+
+def init_logging() -> None:
+    # Keep logs uniform in Railway
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    )ph
