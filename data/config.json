@@ -1,1 +1,29 @@
-ph
+# =========================
+# file: data/config.json
+# (you can paste your current config; this is a safe default)
+# =========================
+{
+  "renames": {},
+  "purge": [],
+  "roles": [],
+  "safeword": {
+    "enabled": true,
+    "trigger": "!STOP!",
+    "release_trigger": "!Release",
+    "log_channel_id": 1400887461907009666,
+    "history_limit": 25,
+    "roles_to_ping": ["Staff", "SECURITY", "The Enforcer", "Watcher", "Red Guard", "The Father"],
+    "roles_whitelist": ["Staff"],
+    "blocked_roles": ["jailed"],
+    "cooldown_seconds": 30,
+    "lock_message": {
+      "text": "!STOP! HAS BEEN CALLED; CHANNEL IS LOCKED PENDING REVIEW, PLEASE STANDBY. THANK YOU FOR YOUR PATIENCE.",
+      "image_url": ""
+    },
+    "release_message": {
+      "text": "Channel released. Please continue respectfully.",
+      "image_url": ""
+    }
+  },
+  "reaction_panels": []
+}
