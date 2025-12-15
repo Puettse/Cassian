@@ -1,7 +1,3 @@
-# =========================
-# file: data/config.json
-# (you can paste your current config; this is a safe default)
-# =========================
 {
   "renames": {},
   "purge": [],
