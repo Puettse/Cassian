@@ -25,5 +25,24 @@
   "reminders": {
     "max_minutes": 20160,
     "tick_seconds": 5
+  },
+  "welcome_gate": {
+    "enabled": true,
+    "channel_id": null,
+    "dm_user": false,
+    "log_channel_id": 1400887461907009666,
+    "message": {
+      "title": "Welcome!",
+      "description": "Welcome to the server, {mention}.\nPlease read the instructions below.",
+      "image_url": ""
+    },
+    "autorole_id": null,
+    "challenge": {
+      "enabled": true,
+      "timeout_hours": 72,
+      "max_attempts": 5,
+      "remove_role_id": null,
+      "grant_role_id": null"
+    }
   }
 }
