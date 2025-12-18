@@ -21,5 +21,9 @@
       "image_url": ""
     }
   },
-  "reaction_panels": []
+  "reaction_panels": [],
+  "reminders": {
+    "max_minutes": 20160,
+    "tick_seconds": 5
+  }
 }
