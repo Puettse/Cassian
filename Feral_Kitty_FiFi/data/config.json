@@ -44,5 +44,7 @@
       "remove_role_id": null,
       "grant_role_id": null"
     }
+    "scheduler": { "jobs": [] 
+    }
   }
 }
