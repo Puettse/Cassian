@@ -27,7 +27,8 @@ EXTENSIONS = [
     "Feral_Kitty_FiFi.features.member_console",
     "Feral_Kitty_FiFi.features.admin",
     "Feral_Kitty_FiFi.features.help",
-    "Feral_Kitty_FiFi.features.reminders",  # ← add this line
+    "Feral_Kitty_FiFi.features.reminders",  
+    "Feral_Kitty_FiFi.features.welcome_gate",
 ]
 
 @bot.event
