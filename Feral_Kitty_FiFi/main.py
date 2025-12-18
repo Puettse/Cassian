@@ -19,7 +19,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# in Feral_Kitty_FiFi/main.py
+# Feral_Kitty_FiFi/main.py (snippet): add your new module path to EXTENSIONS
 EXTENSIONS = [
     "Feral_Kitty_FiFi.features.safeword",
     "Feral_Kitty_FiFi.features.roles_build",
@@ -27,6 +27,7 @@ EXTENSIONS = [
     "Feral_Kitty_FiFi.features.member_console",
     "Feral_Kitty_FiFi.features.admin",
     "Feral_Kitty_FiFi.features.help",
+    "Feral_Kitty_FiFi.features.reminders",  # ← add this line
 ]
 
 @bot.event
