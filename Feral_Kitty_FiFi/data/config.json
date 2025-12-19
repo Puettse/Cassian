@@ -46,5 +46,169 @@
     }
     "scheduler": { "jobs": [] 
     }
+    {
+  "renames": {},
+  "purge": [],
+  "roles": [],
+
+  "safeword": {
+    "enabled": true,
+    "trigger": "!STOP!",
+    "release_trigger": "!Release",
+    "log_channel_id": 1400887461907009666,
+    "history_limit": 25,
+    "roles_to_ping": ["Staff", "SECURITY", "The Enforcer", "Watcher", "Red Guard", "The Father"],
+    "roles_whitelist": ["Staff"],
+    "blocked_roles": ["jailed"],
+    "cooldown_seconds": 30,
+    "lock_message": {
+      "text": "!STOP! HAS BEEN CALLED; CHANNEL IS LOCKED PENDING REVIEW, PLEASE STANDBY. THANK YOU FOR YOUR PATIENCE.",
+      "image_url": ""
+    },
+    "release_message": {
+      "text": "Channel released. Please continue respectfully.",
+      "image_url": ""
+    }
+  },
+
+  "reaction_panels": [],
+  "reminders": {
+    "max_minutes": 20160,
+    "tick_seconds": 5
+  },
+
+  "welcome_gate": {
+    "enabled": true,
+    "channel_id": null,
+    "dm_user": false,
+    "log_channel_id": 1400887461907009666,
+    "message": {
+      "title": "Welcome!",
+      "description": "Welcome to the server, {mention}.\nPlease read the instructions below.",
+      "image_url": ""
+    },
+    "autorole_id": null,
+    "challenge": {
+      "enabled": true,
+      "timeout_hours": 72,
+      "max_attempts": 5,
+      "remove_role_id": null,
+      "grant_role_id": null
+    }
+  },
+
+  "tickets": {
+    "log_channel_id": 1439353009405558865,
+
+    /* IMPORTANT:
+       - staff_role_ids must be ROLE IDs (ints). Use `!ticketspanel_chan staff @Staff @SECURITY` to set automatically,
+         or replace [] with their numeric IDs manually.
+       - roles_to_ping_names is just for clarity; pings are driven by staff_role_ids in the current module. */
+    "staff_role_ids": [],
+    "roles_to_ping_names": ["Staff", "SECURITY"],
+
+    "panel": {
+      "hub_channel_id": 1400631144004976773,
+      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451601705652322466/Untitled_design.png?ex=6946c4f0&is=69457370&hm=21305b292dd9ba85088da4f852b77479aabe8bdb4a8940793ca856831c33e670&=&format=webp&quality=lossless&width=1522&height=856",
+      "title": "⛧ ＰＲ〇ＪΞＣＴ Ｄ〇ＰΛΜＩΝΞ ＴＩＣΚΞＴＳ ⛧",
+      "description": "ᴛᴏ ᴏᴘᴇɴ ᴀ ᴛɪᴄᴋᴇᴛ, ᴘʀᴇꜱꜱ ᴛʜᴇ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴀɴᴅ ꜱᴇʟᴇᴄᴛ ᴀɴ ᴏᴘᴛɪᴏɴ ꜰʀᴏᴍ ᴛʜᴇ ᴅʀᴏᴘᴅᴏᴡɴ.",
+      "colors": ["#7C3AED", "#FF3D8D"]
+    },
+    /* Up to 6 options total. The first three are verification and always verification=true.
+       All use your provided category for creation. */
+    "panel_options": [
+      {
+        "label": "ID VERIFY",
+        "value": "id_verification",
+        "code": "IDV",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🪪",
+        "description": "Upload a valid ID for age verification.",
+        "verification": true,
+        "open_voice": false,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      },
+      {
+        "label": "CROSS VERIFY",
+        "value": "cross_verification",
+        "code": "XVER",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🧩",
+        "description": "Request cross verification from another server.",
+        "verification": true,
+        "open_voice": false,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      },
+      {
+        "label": "VC VERIFY",
+        "value": "video_verification",
+        "code": "VVER",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🎥",
+        "description": "Verify your age over a quick video call.",
+        "verification": true,
+        "open_voice": true,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      },
+
+      /* Non-verification options */
+      {
+        "label": "PARTNERSHIP",
+        "value": "partnership",
+        "code": "PART",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🤝",
+        "description": "Request a partnership review with our team.",
+        "verification": false,
+        "open_voice": false,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      },
+      {
+        "label": "REPORT",
+        "value": "report",
+        "code": "RPRT",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🚨",
+        "description": "Report an issue, request a DNI, or flag safety or security concerns.",
+        "verification": false,
+        "open_voice": false,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      },
+      {
+        "label": "PROMOTION",
+        "value": "promotion",
+        "code": "PROM",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "📢",
+        "description": "Request promo for events, socials, streaming, artwork, or adult links.",
+        "verification": false,
+        "open_voice": false,
+        "staff_role_ids": [],
+        "roles_to_ping_ids": []
+      }
+    ],
+
+    "archive": {
+      "enabled": true,
+      "category_id": 1451595452997697597,
+      "rename_prefix": "closed-"
+    },
+
+    "transcripts": {
+      "format": "html"
+    },
+
+    "delete_images": {
+      "scan_limit": 500
+    },
+
+    "counters": {},
+    "active": {},
+    "records": []
   }
 }
