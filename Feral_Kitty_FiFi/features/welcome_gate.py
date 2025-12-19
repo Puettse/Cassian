@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import random
-import traceback
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone, date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Set
 
 import discord
@@ -16,6 +16,7 @@ from ..utils.discord_resolvers import resolve_channel_any, resolve_role_any
 from ..utils.perms import can_manage_role
 
 
+# ===== utils =====
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -40,77 +41,297 @@ def _calc_age(dob: date, today: Optional[date] = None) -> int:
     return years
 
 
+def _slug_username(member: discord.Member) -> str:
+    base = member.name.lower()
+    base = re.sub(r"[^a-z0-9\-]+", "-", base)
+    base = re.sub(r"-{2,}", "-", base).strip("-")
+    return base or "user"
+
+
+# ===== data =====
 @dataclass
 class Challenge:
     user_id: int
     code: str
     expires_at: datetime
     attempts: int = 0
-
-    def expired(self) -> bool:
-        return utcnow() >= self.expires_at
+    def expired(self) -> bool: return utcnow() >= self.expires_at
 
 
 DEFAULT_CFG: Dict[str, Any] = {
     "enabled": True,
-    "channel_id": None,          # legacy "welcome channel" (used as fallback)
-    "panel_channel_id": None,    # channel where permanent panel lives
-    "panel_message_id": None,    # message id of permanent panel embed
-    "dm_user": False,            # legacy; DM now happens on Verify click
+    "channel_id": None,            # legacy fallback welcome channel
+    "panel_channel_id": None,      # persistent panel channel
+    "panel_message_id": None,      # persistent panel message id
+    "dm_user": False,              # legacy; DM now happens on Verify click
     "log_channel_id": None,
     "message": {
         "title": "Welcome!",
         "description": "Welcome to the server, {mention}.\nClick **Verify** below to get started.",
         "image_url": "",
     },
-    "autorole_id": None,         # role to give on join (e.g., Gated)
-    "jailed_role_id": None,      # role to assign on appeal rejoin
-    "security_role_id": None,    # role to ping on appeal rejoin
-    "staff_role_id": None,       # role to ping on appeal rejoin
-    "minimum_age": 18,           # years
-    "appeals": {},               # {str(user_id): iso_timestamp}
+    "autorole_id": None,           # role to give on join (e.g., Gated)
+    "jailed_role_id": None,        # role assigned when DOB fails
+    "jail_info_channel_id": None,  # channel to announce jailing requirement (optional)
+    "ticket_category_id": None,    # category to create id-verify tickets under (optional)
+    "ticket_prefix": "id-verify",  # ticket channel prefix
+    "security_role_id": None,      # ping & grant access
+    "staff_role_id": None,         # ping & grant access
+    "minimum_age": 18,
     "challenge": {
         "enabled": True,
         "timeout_hours": 72,
         "max_attempts": 5,
-        "remove_role_id": None,  # gated role to remove upon success
-        "grant_role_id": None,   # replacement role to grant upon success (verified)
+        "remove_role_id": None,    # gated role to remove upon success
+        "grant_role_id": None,     # role to grant upon success (verified)
     },
 }
 
+PERSISTENT_VERIFY_ID = "welcome_gate:verify"
 
+
+# ===== persistent verify panel =====
+class WelcomePanelView(discord.ui.View):
+    """Persistent Verify panel (timeout=None + custom_id)."""
+    def __init__(self, cog: "WelcomeGate"):
+        super().__init__(timeout=None)
+        self.cog = cog
+        btn = discord.ui.Button(label="Verify", style=discord.ButtonStyle.primary, custom_id=PERSISTENT_VERIFY_ID)
+        btn.callback = self._on_verify_clicked
+        self.add_item(btn)
+
+    async def _on_verify_clicked(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
+        await self.cog._start_verification_flow(interaction, interaction.user)
+
+
+class VerifyModal(discord.ui.Modal):
+    """Popup modal: DOB + 6-digit passcode."""
+    def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int, require_code: bool):
+        super().__init__(title="Verification", timeout=180)
+        self.cog = cog; self.guild_id = guild_id; self.user_id = user_id; self.require_code = require_code
+        self.dob = discord.ui.TextInput(label="Date of Birth (YYYY-MM-DD)", placeholder="2004-07-15", required=True, max_length=10)
+        self.add_item(self.dob)
+        self.code = None
+        if require_code:
+            self.code = discord.ui.TextInput(label="Passcode (check your DMs)", placeholder="6 digits", required=True, max_length=16)
+            self.add_item(self.code)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.cog._handle_verify_submission(
+            interaction, self.guild_id, self.user_id, self.dob.value, self.code.value if self.code else None
+        )
+
+
+# ===== modal-only config console =====
+class WelcomeConfigView(discord.ui.View):
+    """Admin config console using Modals only (no chat prompts)."""
+    panel_message: Optional[discord.Message] = None
+
+    def __init__(self, cog: "WelcomeGate", ctx: commands.Context):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.ctx = ctx
+
+    async def render(self):
+        if not self.panel_message: return
+        g = self.ctx.guild; cfg = self.cog.cfg(g.id)
+        def _role(rid): 
+            r = resolve_role_any(g, rid); return r.mention if r else str(rid)
+        def _chan(cid):
+            c = resolve_channel_any(g, cid); return c.mention if isinstance(c, discord.TextChannel) else str(cid)
+        def _cat(cid):
+            c = resolve_channel_any(g, cid); return c.name if isinstance(c, discord.CategoryChannel) else str(cid)
+        message = cfg.get("message") or {}
+
+        emb = discord.Embed(
+            title="Welcome Gate — Config",
+            description="Use the buttons below. Changes save instantly.",
+            color=discord.Color.blurple(),
+            timestamp=utcnow(),
+        )
+        emb.add_field(name="Enabled", value=str(bool(cfg.get("enabled", True))), inline=True)
+        emb.add_field(name="Minimum Age", value=str(int(cfg.get("minimum_age") or 18)), inline=True)
+        emb.add_field(name="Ticket Prefix", value=str(cfg.get("ticket_prefix") or "id-verify"), inline=True)
+        emb.add_field(name="Jailed Role", value=_role(cfg.get("jailed_role_id")), inline=True)
+        emb.add_field(name="Security Role", value=_role(cfg.get("security_role_id")), inline=True)
+        emb.add_field(name="Staff Role", value=_role(cfg.get("staff_role_id")), inline=True)
+        emb.add_field(name="Ticket Category", value=_cat(cfg.get("ticket_category_id")), inline=True)
+        emb.add_field(name="Jail Info Channel", value=_chan(cfg.get("jail_info_channel_id")), inline=True)
+        emb.add_field(name="Panel Channel", value=_chan(cfg.get("panel_channel_id")), inline=True)
+        emb.add_field(name="Message Title", value=(message.get("title") or "Welcome!"), inline=True)
+        preview = (message.get("description") or "")[:180] or "_empty_"
+        emb.add_field(name="Message Preview", value=preview, inline=False)
+        if message.get("image_url"): emb.set_image(url=message["image_url"])
+        await self.panel_message.edit(embed=emb, view=self)
+
+    # ----- Base modal -----
+    class _BaseModal(discord.ui.Modal):
+        def __init__(self, view: "WelcomeConfigView", title: str):
+            super().__init__(title=title, timeout=120)
+            self.view = view
+        async def _ok(self, interaction: discord.Interaction, msg: str):
+            await save_config(self.view.cog.bot.config)
+            await interaction.response.send_message(msg, ephemeral=True)
+            await self.view.render()
+        async def _fail(self, interaction: discord.Interaction, msg: str):
+            await interaction.response.send_message(msg, ephemeral=True)
+
+    # ----- Specific Modals -----
+    class SetRoleModal(_BaseModal):
+        def __init__(self, view: "WelcomeConfigView", label: str, key: str):
+            super().__init__(view, f"Set {label}")
+            self.key = key
+            self.input = discord.ui.TextInput(
+                label="Role mention / ID / [Exact Name] (or 'clear')", required=True, max_length=100
+            )
+            self.add_item(self.input)
+        async def on_submit(self, interaction: discord.Interaction):
+            g = self.view.ctx.guild; cfg = self.view.cog.cfg(g.id)
+            text = self.input.value.strip()
+            if text.lower() == "clear":
+                cfg[self.key] = None
+                return await self._ok(interaction, "✅ Cleared.")
+            role = resolve_role_any(g, text)
+            if not role: return await self._fail(interaction, "❌ Role not found.")
+            cfg[self.key] = role.id
+            await self._ok(interaction, f"✅ Set to {role.mention}.")
+
+    class SetChannelModal(_BaseModal):
+        def __init__(self, view: "WelcomeConfigView", label: str, key: str, allow_category: bool = False):
+            super().__init__(view, f"Set {label}")
+            self.key = key; self.allow_category = allow_category
+            self.input = discord.ui.TextInput(
+                label=("Category" if allow_category else "Channel") + " mention / ID / exact name (or 'clear')",
+                required=True, max_length=100
+            )
+            self.add_item(self.input)
+        async def on_submit(self, interaction: discord.Interaction):
+            g = self.view.ctx.guild; cfg = self.view.cog.cfg(g.id); text = self.input.value.strip()
+            if text.lower() == "clear":
+                cfg[self.key] = None
+                return await self._ok(interaction, "✅ Cleared.")
+            ch = resolve_channel_any(g, text)
+            if self.allow_category:
+                if not isinstance(ch, discord.CategoryChannel): return await self._fail(interaction, "❌ Not a category.")
+            else:
+                if not isinstance(ch, discord.TextChannel): return await self._fail(interaction, "❌ Not a text channel.")
+            cfg[self.key] = ch.id
+            await self._ok(interaction, f"✅ Set to {ch.name if isinstance(ch, discord.CategoryChannel) else ch.mention}.")
+
+    class SetMinAgeModal(_BaseModal):
+        def __init__(self, view: "WelcomeConfigView"):
+            super().__init__(view, "Set Minimum Age")
+            self.age = discord.ui.TextInput(label="Minimum Age (e.g., 18)", required=True, max_length=3, default="18")
+            self.add_item(self.age)
+        async def on_submit(self, interaction: discord.Interaction):
+            try:
+                val = max(13, min(99, int(self.age.value.strip())))
+            except ValueError:
+                return await self._fail(interaction, "❌ Numbers only.")
+            cfg = self.view.cog.cfg(self.view.ctx.guild.id)
+            cfg["minimum_age"] = val
+            await self._ok(interaction, f"✅ Minimum age set to {val}.")
+
+    class SetTicketPrefixModal(_BaseModal):
+        def __init__(self, view: "WelcomeConfigView"):
+            super().__init__(view, "Set Ticket Prefix")
+            self.prefix = discord.ui.TextInput(label="Ticket Prefix", required=True, max_length=24, default="id-verify")
+            self.add_item(self.prefix)
+        async def on_submit(self, interaction: discord.Interaction):
+            val = self.prefix.value.strip().lower() or "id-verify"
+            cfg = self.view.cog.cfg(self.view.ctx.guild.id)
+            cfg["ticket_prefix"] = val
+            await self._ok(interaction, f"✅ Ticket prefix set to `{val}`.")
+
+    class SetMessageModal(_BaseModal):
+        def __init__(self, view: "WelcomeConfigView"):
+            super().__init__(view, "Set Welcome Message")
+            self.title_in = discord.ui.TextInput(label="Title", required=False, max_length=256)
+            self.desc_in = discord.ui.TextInput(label="Description (supports {mention})", style=discord.TextStyle.paragraph, required=False, max_length=2000)
+            self.img_in = discord.ui.TextInput(label="Image URL (optional)", required=False, max_length=512)
+            self.add_item(self.title_in); self.add_item(self.desc_in); self.add_item(self.img_in)
+        async def on_submit(self, interaction: discord.Interaction):
+            cfg = self.view.cog.cfg(self.view.ctx.guild.id)
+            m = cfg.setdefault("message", {})
+            if self.title_in.value is not None: m["title"] = self.title_in.value.strip()
+            if self.desc_in.value is not None: m["description"] = self.desc_in.value.strip()
+            if self.img_in.value is not None: m["image_url"] = self.img_in.value.strip()
+            await self._ok(interaction, "✅ Message updated.")
+
+    # ----- Buttons -> Modals / actions -----
+    @discord.ui.button(label="Toggle Enabled", style=discord.ButtonStyle.primary, row=0)
+    async def btn_toggle_enabled(self, interaction: discord.Interaction, _: discord.ui.Button):
+        cfg = self.cog.cfg(self.ctx.guild.id); cfg["enabled"] = not bool(cfg.get("enabled", True))
+        await save_config(self.cog.bot.config)
+        await interaction.response.send_message(f"Enabled → {cfg['enabled']}", ephemeral=True)
+        await self.render()
+
+    @discord.ui.button(label="Set Minimum Age", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_min_age(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetMinAgeModal(self))
+
+    @discord.ui.button(label="Set Jailed Role", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_jailed(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetRoleModal(self, "Jailed Role", "jailed_role_id"))
+
+    @discord.ui.button(label="Set Security Role", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_security(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetRoleModal(self, "Security Role", "security_role_id"))
+
+    @discord.ui.button(label="Set Staff Role", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_staff(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetRoleModal(self, "Staff Role", "staff_role_id"))
+
+    @discord.ui.button(label="Set Ticket Category", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_ticket_cat(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetChannelModal(self, "Ticket Category", "ticket_category_id", allow_category=True))
+
+    @discord.ui.button(label="Set Jail Info Channel", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_jail_info(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetChannelModal(self, "Jail Info Channel", "jail_info_channel_id", allow_category=False))
+
+    @discord.ui.button(label="Set Ticket Prefix", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_ticket_prefix(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetTicketPrefixModal(self))
+
+    @discord.ui.button(label="Set Welcome Text/Image", style=discord.ButtonStyle.success, row=3)
+    async def btn_msg(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(self.SetMessageModal(self))
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=3)
+    async def btn_close(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message("👋 Closed.", ephemeral=True)
+        if self.panel_message: await self.panel_message.edit(view=None)
+        self.stop()
+
+
+# ===== cog =====
 class WelcomeGate(commands.Cog):
-    """Welcome system: permanent Verify panel; DM+modal flow with DOB & passphrase; underage kick+appeal; jailed on rejoin."""
-
-    VERIFY_BTN_ID = "welcome_gate:verify"
-    APPEAL_BTN_ID = "welcome_gate:appeal"
+    """Permanent Verify panel + DOB/passcode modal + underage jail & ticket + modal config console."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._active: Dict[int, Challenge] = {}
         self._used_codes: Set[str] = set()
         self._sweeper.start()
-
-        # persistent views survive restarts
-        self.bot.add_view(WelcomePanelView(self))      # Verify button
-        self.bot.add_view(AppealView(self))            # Appeal button in DM
-
+        self.bot.add_view(WelcomePanelView(self))  # persistent
         if not getattr(self.bot, "intents", None) or not self.bot.intents.members:
             print("[WelcomeGate] ERROR: Intents.members disabled; on_member_join won’t fire.")
 
     def cog_unload(self):
         self._sweeper.cancel()
 
-    # ---------- config ----------
+    # ---- cfg ----
     def cfg(self, guild_id: int) -> Dict[str, Any]:
         all_cfg = self.bot.config.setdefault("welcome_gate", {})
         for k, v in DEFAULT_CFG.items():
             all_cfg.setdefault(k, v if not isinstance(v, dict) else v.copy())
-        # ensure nested defaults
         all_cfg.setdefault("challenge", {}).setdefault("enabled", True)
         return all_cfg
 
-    # ---------- helpers ----------
+    # ---- helpers ----
     def _gen_code(self) -> str:
         for _ in range(1000):
             code = f"{random.randint(0, 999_999):06d}"
@@ -125,32 +346,22 @@ class WelcomeGate(commands.Cog):
             await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     def _format_panel_embed(self, guild: discord.Guild) -> discord.Embed:
-        cfg = self.cfg(guild.id)
-        msg = cfg.get("message") or {}
+        cfg = self.cfg(guild.id); msg = cfg.get("message") or {}
         emb = discord.Embed(
             title=(msg.get("title") or "Welcome!"),
             description=(msg.get("description") or "").replace("{mention}", "{mention}"),
-            color=discord.Color.blurple(),
-            timestamp=utcnow(),
+            color=discord.Color.blurple(), timestamp=utcnow(),
         )
-        if msg.get("image_url"):
-            emb.set_image(url=msg["image_url"])
+        if msg.get("image_url"): emb.set_image(url=msg["image_url"])
         emb.set_footer(text="Press Verify to continue")
         return emb
 
     def _format_dm_code_embed(self, member: discord.Member, code: str, hours: int) -> discord.Embed:
-        emb = discord.Embed(
+        return discord.Embed(
             title="Verification Code",
-            description=(
-                f"Hi {member.mention},\n"
-                f"Use the code below in the popup and complete your DOB.\n"
-                f"**Code:** `{code}`\n"
-                f"Expires in **{hours}h**."
-            ),
-            color=discord.Color.green(),
-            timestamp=utcnow(),
+            description=f"Hi {member.mention},\nUse the code below in the popup and complete your DOB.\n**Code:** `{code}`\nExpires in **{hours}h**.",
+            color=discord.Color.green(), timestamp=utcnow(),
         )
-        return emb
 
     def _welcome_channel(self, guild: discord.Guild) -> Optional[discord.TextChannel]:
         cfg = self.cfg(guild.id)
@@ -161,377 +372,214 @@ class WelcomeGate(commands.Cog):
         if guild.system_channel and guild.system_channel.permissions_for(guild.me).send_messages:
             return guild.system_channel
         for ch in guild.text_channels:
-            perms = ch.permissions_for(guild.me)
-            if perms.read_messages and perms.send_messages:
-                return ch
+            p = ch.permissions_for(guild.me)
+            if p.read_messages and p.send_messages: return ch
         return None
 
-    # ---------- sweeper ----------
+    # ---- background ----
     @tasks.loop(minutes=5)
     async def _sweeper(self):
         expired = [uid for uid, ch in list(self._active.items()) if ch.expired()]
-        for uid in expired:
-            self._active.pop(uid, None)
+        for uid in expired: self._active.pop(uid, None)
         if len(self._used_codes) > 20000:
-            for code in list(self._used_codes)[:5000]:
-                self._used_codes.discard(code)
+            for code in list(self._used_codes)[:5000]: self._used_codes.discard(code)
 
     @_sweeper.before_loop
     async def _before_sweeper(self):
         await self.bot.wait_until_ready()
 
-    # ---------- events ----------
+    # ---- events ----
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        guild = member.guild
-        cfg = self.cfg(guild.id)
-        if not cfg.get("enabled", True):
-            return
-
-        # autorole (gated)
+        guild = member.guild; cfg = self.cfg(guild.id)
+        if not cfg.get("enabled", True): return
         auto = resolve_role_any(guild, cfg.get("autorole_id"))
         if auto and can_manage_role(guild, auto):
-            try:
-                await member.add_roles(auto, reason="WelcomeGate autorole")
-            except Exception:
-                pass
+            try: await member.add_roles(auto, reason="WelcomeGate autorole")
+            except Exception: pass
+        # permanent welcome panel is posted via !welcomepublish
 
-        # appeal rejoin path → jail + ping staff/security
-        appeals = cfg.setdefault("appeals", {})
-        if str(member.id) in appeals:
-            jailed = resolve_role_any(guild, cfg.get("jailed_role_id"))
-            if jailed and can_manage_role(guild, jailed):
-                try:
-                    await member.add_roles(jailed, reason="WelcomeGate appeal rejoin → jailed")
-                except Exception:
-                    pass
-            # ping roles in log channel
-            sec = resolve_role_any(guild, cfg.get("security_role_id"))
-            staff = resolve_role_any(guild, cfg.get("staff_role_id"))
-            ping_text = " ".join([r.mention for r in (sec, staff) if r]) or ""
-            await self._log(
-                guild,
-                f"{ping_text} 🚨 Appeal rejoin: {member.mention} is jailed pending ID verification. Screenshots/cross will not be accepted."
-            )
-            appeals.pop(str(member.id), None)
-            await save_config(self.bot.config)
-
-        # DO NOT send welcome message here; panel is permanent
-
-    # ---------- verify flow ----------
+    # ---- verify flow ----
     async def _start_verification_flow(self, interaction: discord.Interaction, member: discord.Member):
-        guild = member.guild
-        cfg = self.cfg(guild.id)
-        chall_cfg = cfg.get("challenge") or {}
-
+        guild = member.guild; cfg = self.cfg(guild.id); chall_cfg = cfg.get("challenge") or {}
         code = None
         if chall_cfg.get("enabled", True):
             hours = clamp(int(chall_cfg.get("timeout_hours") or 72), 1, 72)
             code = self._gen_code()
-            self._active[member.id] = Challenge(
-                user_id=member.id,
-                code=code,
-                expires_at=utcnow() + timedelta(hours=hours),
-            )
-            # DM code
-            try:
-                await member.send(embed=self._format_dm_code_embed(member, code, hours))
-            except Exception:
-                await self._log(guild, f"✉️ DM failed for {member.mention} during verify.")
-        # open modal
+            self._active[member.id] = Challenge(user_id=member.id, code=code, expires_at=utcnow() + timedelta(hours=hours))
+            try: await member.send(embed=self._format_dm_code_embed(member, code, hours))
+            except Exception: await self._log(guild, f"✉️ DM failed for {member.mention} during verify.")
         await interaction.response.send_modal(VerifyModal(self, guild.id, member.id, require_code=bool(code)))
 
-    async def _handle_verify_submission(
-        self,
-        interaction: discord.Interaction,
-        guild_id: int,
-        user_id: int,
-        dob_text: str,
-        code_text: Optional[str],
-    ):
+    async def _handle_verify_submission(self, interaction: discord.Interaction, guild_id: int, user_id: int, dob_text: str, code_text: Optional[str]):
         guild = interaction.guild or self.bot.get_guild(guild_id)
-        if not guild:
-            return await interaction.response.send_message("❌ Guild context missing.", ephemeral=True)
+        if not guild: return await interaction.response.send_message("❌ Guild context missing.", ephemeral=True)
+        try: member = guild.get_member(user_id) or await guild.fetch_member(user_id)
+        except Exception: member = None
+        if not member: return await interaction.response.send_message("❌ Member not found.", ephemeral=True)
 
-        member = guild.get_member(user_id) or await guild.fetch_member(user_id)
-        if not member:
-            return await interaction.response.send_message("❌ Member not found.", ephemeral=True)
-
-        cfg = self.cfg(guild.id)
-        min_age = int(cfg.get("minimum_age") or 18)
-
+        cfg = self.cfg(guild.id); min_age = int(cfg.get("minimum_age") or 18)
         dob = _parse_yyyy_mm_dd(dob_text)
-        if not dob:
-            return await interaction.response.send_message("❌ DOB format must be YYYY-MM-DD.", ephemeral=True)
+        if not dob: return await interaction.response.send_message("❌ DOB format must be YYYY-MM-DD.", ephemeral=True)
         age = _calc_age(dob)
 
-        # Under 18 → sorry + kick after 10s + DM with appeal
         if age < min_age:
             await interaction.response.send_message(
-                f"🚫 Sorry, you must be **{min_age}+**. You will be removed in 10 seconds.",
+                f"🚫 You must be **{min_age}+**. You have been placed in **jail** and an **ID verification ticket** was opened.",
                 ephemeral=True,
             )
-            await self._log(guild, f"🚫 Underage ({age}) → scheduling kick for {member.mention}.")
-            # schedule kick
-            async def _kick_then_dm():
-                await asyncio.sleep(10)
-                try:
-                    await member.kick(reason=f"WelcomeGate underage ({age})")
-                except Exception as e:
-                    await self._log(guild, f"⚠️ Kick failed for {member.mention}: {type(e).__name__}")
-                    return
-                # DM with appeal button (can DM after kick)
-                try:
-                    view = AppealView(self)
-                    await member.send(
-                        embed=discord.Embed(
-                            title="Removed: Age Requirement",
-                            description=(
-                                f"You appear to be under **{min_age}** based on the DOB provided.\n\n"
-                                "If this was an error, press **Request Rejoin (Appeal)** below to rejoin **jailed** while "
-                                "Security/Staff review your ID. Screenshots/cross will not be accepted."
-                            ),
-                            color=discord.Color.red(),
-                            timestamp=utcnow(),
-                        ),
-                        view=view,
-                    )
-                except Exception:
-                    pass
-            asyncio.create_task(_kick_then_dm())
+            await self._log(guild, f"🚨 Underage ({age}) → jailing & opening ticket for {member.mention}.")
+            await self._jail_and_open_id_ticket(member)
             return
 
-        # Age OK → require code if challenge enabled
         chall_cfg = cfg.get("challenge") or {}
         if chall_cfg.get("enabled", True):
             ch = self._active.get(member.id)
             if not ch or ch.expired():
                 self._active.pop(member.id, None)
-                return await interaction.followup.send("⏱️ Your verification session expired. Click Verify again.", ephemeral=True)
+                return await interaction.response.send_message("⏱️ Session expired. Click Verify again.", ephemeral=True)
             max_attempts = clamp(int(chall_cfg.get("max_attempts") or 5), 1, 10)
             if ch.attempts >= max_attempts:
                 self._active.pop(member.id, None)
-                return await interaction.followup.send("❌ Attempts exceeded. Ask staff.", ephemeral=True)
+                return await interaction.response.send_message("❌ Attempts exceeded. Ask staff.", ephemeral=True)
             if not code_text or code_text.strip() != ch.code:
                 ch.attempts += 1
                 remain = max_attempts - ch.attempts
-                return await interaction.response.send_message(
-                    f"❌ Incorrect passcode. Attempts left: **{remain}**.", ephemeral=True
-                )
-            # success → swap roles
+                return await interaction.response.send_message(f"❌ Incorrect passcode. Attempts left: **{remain}**.", ephemeral=True)
             gated = resolve_role_any(guild, chall_cfg.get("remove_role_id"))
             grant = resolve_role_any(guild, chall_cfg.get("grant_role_id"))
             if gated and can_manage_role(guild, gated) and gated in member.roles:
-                try:
-                    await member.remove_roles(gated, reason="WelcomeGate verified - remove gated")
-                except Exception:
-                    pass
+                try: await member.remove_roles(gated, reason="WelcomeGate verified - remove gated")
+                except Exception: pass
             if grant and can_manage_role(guild, grant) and grant not in member.roles:
-                try:
-                    await member.add_roles(grant, reason="WelcomeGate verified - grant")
-                except Exception:
-                    pass
+                try: await member.add_roles(grant, reason="WelcomeGate verified - grant")
+                except Exception: pass
             self._used_codes.add(ch.code); self._active.pop(member.id, None)
 
         await interaction.response.send_message("✅ Verified. Welcome!", ephemeral=True)
         await self._log(guild, f"✅ {member.mention} verified (age {age}).")
 
-    # ---------- commands ----------
+    # ---- jailing & ticket helpers ----
+    async def _jail_and_open_id_ticket(self, member: discord.Member):
+        guild = member.guild; cfg = self.cfg(guild.id)
+        jailed_role = resolve_role_any(guild, cfg.get("jailed_role_id"))
+        if not jailed_role: return await self._log(guild, f"⚠️ jailed_role_id not set; cannot jail {member.mention}.")
+
+        roles_to_remove = []
+        for r in member.roles:
+            if r.is_default(): continue
+            if can_manage_role(guild, r): roles_to_remove.append(r)
+        if roles_to_remove:
+            try: await member.remove_roles(*roles_to_remove, reason="WelcomeGate DOB failed → jail")
+            except Exception: pass
+
+        if can_manage_role(guild, jailed_role) and jailed_role not in member.roles:
+            try: await member.add_roles(jailed_role, reason="WelcomeGate DOB failed → jail")
+            except Exception: pass
+
+        channel = await self._create_id_ticket_channel(member)
+        if channel: await self._post_ticket_intro(channel, member)
+        else: await self._log(guild, f"⚠️ Failed to create ticket channel for {member.mention}.")
+        await self._maybe_post_jail_info(member)
+
+    async def _create_id_ticket_channel(self, member: discord.Member) -> Optional[discord.TextChannel]:
+        guild = member.guild; cfg = self.cfg(guild.id)
+        prefix = (cfg.get("ticket_prefix") or "id-verify").strip() or "id-verify"
+        base = f"{prefix}-{_slug_username(member)}"; name = base
+
+        category = None
+        cat = resolve_channel_any(guild, cfg.get("ticket_category_id"))
+        if isinstance(cat, discord.CategoryChannel): category = cat
+
+        overwrites: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
+        overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+
+        security = resolve_role_any(guild, cfg.get("security_role_id"))
+        staff = resolve_role_any(guild, cfg.get("staff_role_id"))
+        jailed_role = resolve_role_any(guild, cfg.get("jailed_role_id"))
+
+        mod_pw = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, manage_messages=True)
+        if security: overwrites[security] = mod_pw
+        if staff and staff != security: overwrites[staff] = mod_pw
+
+        overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True)
+        if jailed_role: overwrites[jailed_role] = discord.PermissionOverwrite(view_channel=False)
+
+        i = 1
+        while discord.utils.get(guild.text_channels, name=name) is not None:
+            i += 1; name = f"{base}-{i}"
+
+        try:
+            return await guild.create_text_channel(
+                name=name, category=category, overwrites=overwrites,
+                reason=f"WelcomeGate ID verification ticket for {member} ({member.id})"
+            )
+        except Exception:
+            return None
+
+    async def _post_ticket_intro(self, channel: discord.TextChannel, member: discord.Member):
+        guild = member.guild; cfg = self.cfg(guild.id)
+        security = resolve_role_any(guild, cfg.get("security_role_id"))
+        staff = resolve_role_any(guild, cfg.get("staff_role_id"))
+        pings = " ".join([x.mention for x in (security, staff) if x]) or ""
+        emb = discord.Embed(
+            title="ID Verification Required",
+            description=(
+                f"{member.mention}, to remain in the server you must complete **ID Verification**.\n"
+                "• Upload a **clear photo of government ID** and a **note** with today's date and your Discord tag.\n"
+                "• Cover non-essential info. **Screenshots/cross will not be accepted.**\n"
+                "• A moderator will review and respond here."
+            ),
+            color=discord.Color.orange(), timestamp=utcnow(),
+        )
+        try:
+            await channel.send(content=pings or None, embed=emb, allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False))
+        except Exception:
+            pass
+
+    async def _maybe_post_jail_info(self, member: discord.Member):
+        guild = member.guild; cfg = self.cfg(guild.id)
+        ch = resolve_channel_any(guild, cfg.get("jail_info_channel_id"))
+        if isinstance(ch, discord.TextChannel):
+            try:
+                await ch.send(
+                    f"{member.mention} has been **jailed** pending ID verification. A private ticket was created.",
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                )
+            except Exception:
+                pass
+
+    # ---- commands ----
     @commands.has_permissions(administrator=True)
     @commands.command(name="welcomepublish")
     async def welcomepublish_cmd(self, ctx: commands.Context):
         """Publish or update the permanent Verify panel."""
         guild = ctx.guild
-        if not guild:
-            return await ctx.reply("❌ Run in a guild.")
-
-        cfg = self.cfg(guild.id)
-        ch = self._welcome_channel(guild)
-        if not ch:
-            return await ctx.reply("🚫 No channel available to post the panel.")
-
-        embed = self._format_panel_embed(guild)
-        view = WelcomePanelView(self)
-
-        # update existing if present
-        msg_id = cfg.get("panel_message_id")
+        if not guild: return await ctx.reply("❌ Run in a guild.")
+        cfg = self.cfg(guild.id); ch = self._welcome_channel(guild)
+        if not ch: return await ctx.reply("🚫 No channel available to post the panel.")
+        embed = self._format_panel_embed(guild); view = WelcomePanelView(self)
         msg = None
-        if isinstance(msg_id, int):
-            try:
-                msg = await ch.fetch_message(msg_id)
-            except Exception:
-                msg = None
-
+        if isinstance(cfg.get("panel_message_id"), int):
+            try: msg = await ch.fetch_message(cfg["panel_message_id"])
+            except Exception: msg = None
         if msg:
-            await msg.edit(embed=embed, view=view)
-            await ctx.reply(f"✅ Updated panel in {ch.mention}")
+            await msg.edit(embed=embed, view=view); await ctx.reply(f"✅ Updated panel in {ch.mention}")
         else:
             msg = await ch.send(embed=embed, view=view)
-            cfg["panel_channel_id"] = ch.id
-            cfg["panel_message_id"] = msg.id
-            await save_config(self.bot.config)
-            await ctx.reply(f"✅ Published panel in {ch.mention}")
+            cfg["panel_channel_id"] = ch.id; cfg["panel_message_id"] = msg.id
+            await save_config(self.bot.config); await ctx.reply(f"✅ Published panel in {ch.mention}")
 
     @commands.has_permissions(administrator=True)
     @commands.command(name="welcomepanel")
     async def welcomepanel_cmd(self, ctx: commands.Context):
-        """Open the config console (unchanged from your previous modal-based editor or keep your version)."""
-        await ctx.send("ℹ️ Use `!welcomepublish` to post the permanent Verify panel. Use your config UI to change text/roles.")
-
-    # existing commands (pass, etc.) can remain if you still want them, but the modal path supersedes it.
-
-
-# ---------- UI: Persistent Verify Panel ----------
-class WelcomePanelView(discord.ui.View):
-    def __init__(self, cog: WelcomeGate):
-        # persistent view: timeout=None and fixed custom_id
-        super().__init__(timeout=None)
-        self.cog = cog
-        # attach the button dynamically to ensure custom_id is set on restart-safe view
-        self.add_item(
-            discord.ui.Button(
-                label="Verify",
-                style=discord.ButtonStyle.primary,
-                custom_id=WelcomeGate.VERIFY_BTN_ID,
-            )
-        )
-
-    @discord.ui.button(label="__hidden__", style=discord.ButtonStyle.secondary, disabled=True)
-    async def _placeholder(self, *_):  # never used; avoids empty-view serialization issues
-        pass
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
-            return False
-        return True
-
-    async def on_timeout(self):  # not used for persistent views
-        pass
-
-    async def on_error(self, error: Exception, item: discord.ui.Item, interaction: discord.Interaction):
-        try:
-            await interaction.response.send_message("⚠️ Something went wrong.", ephemeral=True)
-        except Exception:
-            pass
-
-    async def interaction(self, interaction: discord.Interaction):
-        pass  # unused; handled below via on_button_click
+        """Open modal-only config console."""
+        view = WelcomeConfigView(self, ctx)
+        msg = await ctx.send(embed=discord.Embed(title="Welcome Gate — Config", description="Loading…", color=discord.Color.blurple()), view=view)
+        view.panel_message = msg
+        await view.render()
 
 
-# map custom_id → handler (discord.py handles this when view is registered)
-@discord.ui.button(label="Verify", style=discord.ButtonStyle.primary, custom_id=WelcomeGate.VERIFY_BTN_ID)
-async def _handle_verify_button(interaction: discord.Interaction):
-    cog = interaction.client.get_cog("WelcomeGate")
-    if not isinstance(cog, WelcomeGate):
-        try:
-            await interaction.response.send_message("❌ Cog not ready.", ephemeral=True)
-        except Exception:
-            pass
-        return
-    member = interaction.user if isinstance(interaction.user, discord.Member) else None
-    if not member:
-        return await interaction.response.send_message("❌ Member context required.", ephemeral=True)
-    await cog._start_verification_flow(interaction, member)
-
-
-# ---------- Modal: DOB + Passcode ----------
-class VerifyModal(discord.ui.Modal):
-    def __init__(self, cog: WelcomeGate, guild_id: int, user_id: int, require_code: bool):
-        super().__init__(title="Verification", timeout=180)
-        self.cog = cog
-        self.guild_id = guild_id
-        self.user_id = user_id
-        self.require_code = require_code
-
-        self.dob = discord.ui.TextInput(
-            label="Date of Birth (YYYY-MM-DD)",
-            placeholder="2004-07-15",
-            required=True,
-            max_length=10,
-        )
-        self.add_item(self.dob)
-
-        self.code = discord.ui.TextInput(
-            label="Passcode (sent to your DMs)",
-            placeholder="Enter 6 digits (check your DM)",
-            required=require_code,
-            max_length=16,
-        )
-        if require_code:
-            self.add_item(self.code)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.cog._handle_verify_submission(
-            interaction,
-            self.guild_id,
-            self.user_id,
-            self.dob.value,
-            self.code.value if self.require_code else None,
-        )
-
-
-# ---------- Appeal: DM button to request rejoin ----------
-class AppealView(discord.ui.View):
-    def __init__(self, cog: WelcomeGate):
-        super().__init__(timeout=3600)
-        self.cog = cog
-        self.add_item(
-            discord.ui.Button(
-                label="Request Rejoin (Appeal)",
-                style=discord.ButtonStyle.primary,
-                custom_id=WelcomeGate.APPEAL_BTN_ID,
-            )
-        )
-
-    @discord.ui.button(label="__hidden__", style=discord.ButtonStyle.secondary, disabled=True)
-    async def _placeholder(self, *_):  # serialization helper
-        pass
-
-    @discord.ui.button(label="Request Rejoin (Appeal)", style=discord.ButtonStyle.primary, custom_id=WelcomeGate.APPEAL_BTN_ID)
-    async def _appeal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        if not isinstance(user, (discord.User, discord.Member)):
-            return await interaction.response.send_message("❌ Invalid user.", ephemeral=True)
-
-        # Find a guild where this cog is active and the user was kicked from (this DM path only makes sense for the same guild)
-        # If your bot is single-guild, you can store guild_id in the DM prior. For simplicity, pick the first mutual guild.
-        if not user.mutual_guilds:
-            return await interaction.response.send_message("❌ No mutual servers found.", ephemeral=True)
-        guild = user.mutual_guilds[0]
-        cfg = self.cog.cfg(guild.id)
-
-        # mark appeal flag (why: jail on rejoin)
-        cfg.setdefault("appeals", {})[str(user.id)] = utcnow().isoformat()
-        await save_config(self.cog.bot.config)
-
-        # create 1-use invite
-        ch = self.cog._welcome_channel(guild)
-        invite_url = None
-        if isinstance(ch, discord.TextChannel) and ch.permissions_for(guild.me).create_instant_invite:
-            try:
-                invite = await ch.create_invite(max_uses=1, max_age=3600, unique=True, reason="WelcomeGate appeal rejoin")
-                invite_url = invite.url
-            except Exception:
-                invite_url = None
-
-        if not invite_url:
-            await interaction.response.send_message(
-                "✅ Appeal recorded. Ask a moderator for an invite link to rejoin; you’ll be **jailed** on entry.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            f"✅ Appeal recorded. Use this link to rejoin (1 use, 1 hour): {invite_url}\n"
-            "On join, you’ll be **jailed** until Security/Staff review your ID.",
-            ephemeral=True,
-        )
-# discord.py v2+ (preferred)
+# ===== extension entrypoint =====
 async def setup(bot: commands.Bot):
-    """Extension entrypoint required by discord.py: adds the cog."""
     await bot.add_cog(WelcomeGate(bot))
-
-# If you're on older discord.py that expects a sync entrypoint, use this instead:
-# def setup(bot: commands.Bot):
-#     bot.add_cog(WelcomeGate(bot))
