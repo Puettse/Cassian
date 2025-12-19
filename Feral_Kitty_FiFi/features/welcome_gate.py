@@ -1,7 +1,6 @@
 # Feral_Kitty_FiFi/features/welcome_gate.py
 from __future__ import annotations
 
-import asyncio
 import random
 import re
 from dataclasses import dataclass
@@ -13,19 +12,23 @@ from discord.ext import commands, tasks
 
 from ..config import save_config
 from ..utils.discord_resolvers import resolve_channel_any, resolve_role_any
-from ..utils.perms import can_manage_role
+from ..utils.perms import can_manage_role  # role hierarchy safety
 
 
-# ===== HARD-CODED CONSTANTS (per request) =====
+# ===== HARD-CODED CONSTANTS (per requirements) =====
 TICKET_CATEGORY_ID = 1400849393652990083          # [Req. Verify] category
-LOG_CHANNEL_ID = 1438922658636107847              # all gateway logs AND age-check embeds
-MIN_AGE = 18                                       # hard age limit
-PASSCODE_TIMEOUT_H = 48                            # 48 hours
-PASSCODE_ATTEMPTS = 4                              # 4 tries
-TICKET_PREFIX = "id-verify"                        # ticket name prefix
+LOG_CHANNEL_ID = 1438922658636107847              # all gateway logs + age-check embeds
+MIN_AGE = 18
+PASSCODE_TIMEOUT_H = 48
+PASSCODE_ATTEMPTS = 4
+TICKET_PREFIX = "id-verify"
+
+# Persistent button custom IDs
+VERIFY_BTN_ID = "welcome_gate:age_check"   # persistent
+# (ephemeral passcode button uses a view-only button without global custom_id)
 
 
-# ===== helpers =====
+# ===== utils =====
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -57,20 +60,7 @@ def _slug_username(member: discord.Member) -> str:
     return base or "user"
 
 
-# ===== minimal config (only roles remain configurable) =====
-DEFAULT_CFG: Dict[str, Any] = {
-    "enabled": True,
-    "autorole_id": None,      # GATED on join
-    "remove_role_id": None,   # remove on verify (usually GATED)
-    "grant_role_id": None,    # grant on verify (Member)
-    "jailed_role_id": None,   # apply if underage
-    "security_role_id": None, # can manage/see tickets, pinged
-    "staff_role_id": None,    # can manage/see tickets, pinged
-    # runtime state (do not edit by hand)
-    "tickets": {},            # {str(user_id): channel_id}
-}
-
-
+# ===== runtime data =====
 @dataclass
 class Challenge:
     user_id: int
@@ -82,8 +72,52 @@ class Challenge:
         return utcnow() >= self.expires_at
 
 
-# ===== Modals & Views =====
+# ===== minimal cfg (roles, panel placement, message, tickets) =====
+DEFAULT_CFG: Dict[str, Any] = {
+    "enabled": True,
+    # roles
+    "autorole_id": None,      # GATED on join
+    "remove_role_id": None,   # remove on passcode success (usually GATED)
+    "grant_role_id": None,    # grant on passcode success (e.g., Member)
+    "jailed_role_id": None,   # applied if underage
+    "security_role_id": None, # see/manage tickets, pinged
+    "staff_role_id": None,    # see/manage tickets, pinged
+    # tickets index {str(user_id): channel_id}
+    "tickets": {},
+    # panel placement + content
+    "panel_channel_id": None,
+    "panel_message_id": None,
+    "message": {
+        "title": "Welcome!",
+        "description": (
+            "Welcome to the server, {mention}.\n\n"
+            "Please **enter your Date of Birth** and press **Age Check**.\n"
+            "❗ **Warning:** The DOB you provide must match your ID during verification, "
+            "or a ban may be enforced."
+        ),
+        "image_url": "",
+    },
+}
+
+
+# ===== Views & Modals (user flow) =====
+class WelcomePanelView(discord.ui.View):
+    """Persistent Verify panel (button opens DOB modal)."""
+    def __init__(self, cog: "WelcomeGate"):
+        super().__init__(timeout=None)
+        self.cog = cog
+        btn = discord.ui.Button(label="Age Check", style=discord.ButtonStyle.primary, custom_id=VERIFY_BTN_ID)
+        btn.callback = self._on_age_check_clicked
+        self.add_item(btn)
+
+    async def _on_age_check_clicked(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
+        await interaction.response.send_modal(AgeModal(self.cog, interaction.guild.id, interaction.user.id))
+
+
 class AgeModal(discord.ui.Modal):
+    """First step: DOB input"""
     def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
         super().__init__(title="Age Check", timeout=180)
         self.cog = cog
@@ -110,7 +144,7 @@ class AgeModal(discord.ui.Modal):
         if not dob:
             return await interaction.response.send_message("❌ DOB must be YYYY-MM-DD.", ephemeral=True)
 
-        # Log this age check (immutable log; we won't edit it later)
+        # Immutable age-check log (we never edit this message)
         await self.cog._log_age_check_embed(guild, member, dob)
 
         age = _calc_age(dob)
@@ -123,7 +157,7 @@ class AgeModal(discord.ui.Modal):
             await self.cog._log(guild, f"🚨 Underage ({age}) → jailed & ticket for {member.mention}.")
             return
 
-        # Age OK → issue passcode and prompt to enter (ephemeral only)
+        # Age OK → issue challenge & prompt for passcode (ephemeral only)
         code = self.cog._start_or_refresh_challenge(member)
         emb = discord.Embed(
             title="Your Passcode",
@@ -136,12 +170,13 @@ class AgeModal(discord.ui.Modal):
             color=discord.Color.green(),
             timestamp=utcnow(),
         )
-        view = _PasscodePromptView(self.cog, guild.id, member.id)
+        view = PasscodePromptView(self.cog, guild.id, member.id)
         await interaction.response.send_message(embed=emb, view=view, ephemeral=True)
         await self.cog._log(guild, f"🔐 Passcode issued to {member.mention} (age {age}).")
 
 
-class _PasscodePromptView(discord.ui.View):
+class PasscodePromptView(discord.ui.View):
+    """Ephemeral 'Enter Passcode' opener."""
     def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
         super().__init__(timeout=300)
         self.cog = cog
@@ -156,6 +191,7 @@ class _PasscodePromptView(discord.ui.View):
 
 
 class PasscodeModal(discord.ui.Modal):
+    """Second step: passcode entry."""
     def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
         super().__init__(title="Enter Passcode", timeout=120)
         self.cog = cog
@@ -181,24 +217,190 @@ class PasscodeModal(discord.ui.Modal):
         await self.cog._log(guild, f"{'✅' if ok else '❌'} Passcode result for {member.mention}: {msg}")
 
 
+# ===== Admin Config — EPHEMERAL PICKERS (no chat typing) =====
+class _RolePickView(discord.ui.View):
+    """Ephemeral role selector that writes to config immediately."""
+    def __init__(self, cog: "WelcomeGate", guild: discord.Guild, key: str, label: str):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild = guild
+        self.key = key
+        self.label = label
+
+        class _RS(discord.ui.RoleSelect):
+            def __init__(self, outer: "_RolePickView"):
+                super().__init__(min_values=1, max_values=1)
+                self.outer = outer
+
+            async def callback(self, itx: discord.Interaction):
+                role = self.values[0]
+                cfg = self.outer.cog.cfg(self.outer.guild.id)
+                cfg[self.outer.key] = role.id
+                await save_config(self.outer.cog.bot.config)
+                await itx.response.edit_message(content=f"✅ {self.outer.label} → {role.mention}", view=None)
+
+        self.add_item(_RS(self))
+
+
+class _TextChannelPickView(discord.ui.View):
+    """Ephemeral text-channel selector (for panel channel)."""
+    def __init__(self, cog: "WelcomeGate", guild: discord.Guild, key: str, label: str):
+        super().__init__(timeout=120)
+        self.cog = cog
+        self.guild = guild
+        self.key = key
+        self.label = label
+
+        class _CS(discord.ui.ChannelSelect):
+            def __init__(self, outer: "_TextChannelPickView"):
+                super().__init__(channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
+                self.outer = outer
+
+            async def callback(self, itx: discord.Interaction):
+                ch = self.values[0]
+                cfg = self.outer.cog.cfg(self.outer.guild.id)
+                cfg[self.outer.key] = ch.id
+                await save_config(self.outer.cog.bot.config)
+                await itx.response.edit_message(content=f"✅ {self.outer.label} → {ch.mention}", view=None)
+
+        self.add_item(_CS(self))
+
+
+class WelcomeConfigView(discord.ui.View):
+    """Admin config console using **only** ephemeral pickers (no chat input)."""
+    panel_message: Optional[discord.Message] = None
+
+    def __init__(self, cog: "WelcomeGate", ctx: commands.Context):
+        super().__init__(timeout=600)
+        self.cog = cog
+        self.ctx = ctx
+
+    async def render(self):
+        if not self.panel_message:
+            return
+        g = self.ctx.guild
+        cfg = self.cog.cfg(g.id)
+
+        def _role_name(rid):
+            r = resolve_role_any(g, rid)
+            return r.mention if r else "None"
+
+        def _chan_mention(cid):
+            c = resolve_channel_any(g, cid)
+            return c.mention if isinstance(c, discord.TextChannel) else "None"
+
+        m = cfg.get("message") or {}
+        emb = discord.Embed(
+            title="Welcome Gate — Config",
+            description="Click buttons to open **ephemeral pickers**. No chat typing. Changes save instantly.",
+            color=discord.Color.blurple(),
+            timestamp=utcnow(),
+        )
+        # Hard-coded (read-only)
+        emb.add_field(name="Ticket Category (hard-coded)", value=f"<#{TICKET_CATEGORY_ID}>", inline=True)
+        emb.add_field(name="Log Channel (hard-coded)", value=f"<#{LOG_CHANNEL_ID}>", inline=True)
+        emb.add_field(name="Min Age / Timeout / Attempts", value=f"{MIN_AGE} / {PASSCODE_TIMEOUT_H}h / {PASSCODE_ATTEMPTS}", inline=True)
+
+        # Roles (editable)
+        emb.add_field(name="Autorole on Join (GATED)", value=_role_name(cfg.get("autorole_id")), inline=True)
+        emb.add_field(name="Remove on Verify", value=_role_name(cfg.get("remove_role_id")), inline=True)
+        emb.add_field(name="Grant on Verify", value=_role_name(cfg.get("grant_role_id")), inline=True)
+        emb.add_field(name="Jailed Role", value=_role_name(cfg.get("jailed_role_id")), inline=True)
+        emb.add_field(name="Security Role", value=_role_name(cfg.get("security_role_id")), inline=True)
+        emb.add_field(name="Staff Role", value=_role_name(cfg.get("staff_role_id")), inline=True)
+
+        # Panel placement + preview
+        emb.add_field(name="Panel Channel", value=_chan_mention(cfg.get("panel_channel_id")), inline=True)
+        emb.add_field(name="Message Title", value=(m.get("title") or "Welcome!"), inline=True)
+        preview = (m.get("description") or "")[:200] or "_empty_"
+        emb.add_field(name="Message Preview", value=preview, inline=False)
+        if m.get("image_url"):
+            emb.set_image(url=m["image_url"])
+
+        await self.panel_message.edit(embed=emb, view=self)
+
+    # Buttons → ephemeral pickers
+    @discord.ui.button(label="Autorole (GATED)", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_auto(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Autorole (GATED)**",
+            view=_RolePickView(self.cog, self.ctx.guild, "autorole_id", "Autorole (GATED)"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Remove on Verify", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_remove(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Role to Remove on Verify**",
+            view=_RolePickView(self.cog, self.ctx.guild, "remove_role_id", "Remove on Verify"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Grant on Verify", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_grant(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Role to Grant on Verify**",
+            view=_RolePickView(self.cog, self.ctx.guild, "grant_role_id", "Grant on Verify"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Jailed Role", style=discord.ButtonStyle.secondary, row=1)
+    async def btn_jailed(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Jailed Role**",
+            view=_RolePickView(self.cog, self.ctx.guild, "jailed_role_id", "Jailed Role"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Security Role", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_security(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Security Role**",
+            view=_RolePickView(self.cog, self.ctx.guild, "security_role_id", "Security Role"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Staff Role", style=discord.ButtonStyle.secondary, row=2)
+    async def btn_staff(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Staff Role**",
+            view=_RolePickView(self.cog, self.ctx.guild, "staff_role_id", "Staff Role"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Panel Channel", style=discord.ButtonStyle.secondary, row=3)
+    async def btn_panel_channel(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message(
+            "Pick **Panel Channel** (where Verify panel lives)",
+            view=_TextChannelPickView(self.cog, self.ctx.guild, "panel_channel_id", "Panel Channel"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, row=3)
+    async def btn_close(self, itx: discord.Interaction, _: discord.ui.Button):
+        await itx.response.send_message("👋 Closed.", ephemeral=True)
+        if self.panel_message:
+            await self.panel_message.edit(view=None)
+        self.stop()
+
+
 # ===== Cog =====
 class WelcomeGate(commands.Cog):
-    """Slash-only, no public panel. Flow:
-    /agecheck → DOB modal → (underage → jail + ticket) or (age OK → passcode modal → verify).
-    Logs: all actions and immutable age-check embeds in hard-coded LOG_CHANNEL_ID.
-    """
+    """Prefix admin cmds + persistent Verify panel for user modals. Fully logged; hard-coded ticket & log destinations."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._challenges: Dict[int, Challenge] = {}  # user_id -> Challenge
+        self._challenges: Dict[int, Challenge] = {}
         self._sweeper.start()
+        # register persistent view at startup
+        self.bot.add_view(WelcomePanelView(self))
         if not getattr(self.bot, "intents", None) or not self.bot.intents.members:
-            print("[WelcomeGate] ERROR: Intents.members disabled; member events limited.")
+            print("[WelcomeGate] WARNING: Intents.members disabled; on_member_join won’t fire.")
 
     def cog_unload(self):
         self._sweeper.cancel()
 
-    # --- config ---
+    # ---- config access ----
     def cfg(self, guild_id: int) -> Dict[str, Any]:
         all_cfg = self.bot.config.setdefault("welcome_gate", {})
         for k, v in DEFAULT_CFG.items():
@@ -206,7 +408,7 @@ class WelcomeGate(commands.Cog):
         all_cfg.setdefault("tickets", {})
         return all_cfg
 
-    # --- utils ---
+    # ---- logging ----
     async def _log(self, guild: discord.Guild, text: str):
         ch = resolve_channel_any(guild, LOG_CHANNEL_ID)
         if isinstance(ch, discord.TextChannel):
@@ -216,18 +418,14 @@ class WelcomeGate(commands.Cog):
         ch = resolve_channel_any(guild, LOG_CHANNEL_ID)
         if not isinstance(ch, discord.TextChannel):
             return
-        emb = discord.Embed(
-            title="Age Check Submitted",
-            color=discord.Color.blurple(),
-            timestamp=utcnow(),
-        )
+        emb = discord.Embed(title="Age Check Submitted", color=discord.Color.blurple(), timestamp=utcnow())
         emb.add_field(name="User", value=f"{member} ({member.mention})", inline=False)
         emb.add_field(name="User ID", value=str(member.id), inline=True)
         emb.add_field(name="DOB Entered", value=dob.isoformat(), inline=True)
         emb.set_thumbnail(url=member.display_avatar.url if member.display_avatar else discord.Embed.Empty)
-        # no edits performed later → “immutable log”
         await ch.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
 
+    # ---- challenge helpers ----
     def _gen_code(self) -> str:
         return f"{random.randint(0, 999_999):06d}"
 
@@ -241,65 +439,12 @@ class WelcomeGate(commands.Cog):
         )
         return code
 
-    # --- background cleanup ---
-    @tasks.loop(minutes=5)
-    async def _sweeper(self):
-        expired = [uid for uid, ch in list(self._challenges.items()) if ch.expired()]
-        for uid in expired:
-            self._challenges.pop(uid, None)
-
-    @_sweeper.before_loop
-    async def _before_sweeper(self):
-        await self.bot.wait_until_ready()
-
-    # --- events ---
-    @commands.Cog.listener()
-    async def on_member_join(self, member: discord.Member):
-        cfg = self.cfg(member.guild.id)
-        auto = resolve_role_any(member.guild, cfg.get("autorole_id"))
-        if auto and can_manage_role(member.guild, auto):
-            try:
-                await member.add_roles(auto, reason="WelcomeGate autorole (GATED)")
-            except Exception:
-                pass
-
-    @commands.Cog.listener()
-    async def on_member_remove(self, member: discord.Member):
-        guild = member.guild
-        cfg = self.cfg(guild.id)
-        tickets: Dict[str, int] = cfg.setdefault("tickets", {})
-        ch_id = tickets.get(str(member.id))
-        if ch_id:
-            ch = guild.get_channel(ch_id)
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send(
-                        f"🚪 {member.mention} left the server. Initiating ban for **age verification evasion**.",
-                        allowed_mentions=discord.AllowedMentions.none(),
-                    )
-                except Exception:
-                    pass
-                try:
-                    await guild.ban(discord.Object(member.id), reason="age verification evasion")
-                except Exception:
-                    pass
-                await self._archive_ticket_channel(ch, reason="Member left — auto-archive (age verification evasion)")
-            await self._log(guild, f"🚫 {member} left during verification — banned (age verification evasion).")
-
-    # --- slash command entrypoint ---
-    @commands.hybrid_command(name="agecheck", description="Open the age check popup (DOB).")
-    async def agecheck_cmd(self, ctx: commands.Context):
-        if not isinstance(ctx.author, discord.Member):
-            return await ctx.reply("❌ Run in a server.", ephemeral=True)  # type: ignore[arg-type]
-        await ctx.interaction.response.send_modal(AgeModal(self, ctx.guild.id, ctx.author.id))  # type: ignore[union-attr]
-
-    # --- passcode finalize ---
     async def _finalize_passcode(self, member: discord.Member, user_code: str) -> tuple[bool, str]:
         guild = member.guild
         ch = self._challenges.get(member.id)
         if not ch or ch.expired():
             self._challenges.pop(member.id, None)
-            return False, "⏱️ Session expired. Run **/agecheck** again."
+            return False, "⏱️ Session expired. Press **Age Check** again."
 
         if ch.attempts >= PASSCODE_ATTEMPTS:
             self._challenges.pop(member.id, None)
@@ -330,7 +475,125 @@ class WelcomeGate(commands.Cog):
         await self._log(guild, f"✅ {member.mention} verified (passcode).")
         return True, "✅ Verified. Welcome!"
 
-    # --- jail & ticket ---
+    # ---- background cleanup ----
+    @tasks.loop(minutes=5)
+    async def _sweeper(self):
+        expired = [uid for uid, ch in list(self._challenges.items()) if ch.expired()]
+        for uid in expired:
+            self._challenges.pop(uid, None)
+
+    @_sweeper.before_loop
+    async def _before_sweeper(self):
+        await self.bot.wait_until_ready()
+
+    # ---- events ----
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        cfg = self.cfg(member.guild.id)
+        if not cfg.get("enabled", True):
+            return
+        auto = resolve_role_any(member.guild, cfg.get("autorole_id"))
+        if auto and can_manage_role(member.guild, auto):
+            try:
+                await member.add_roles(auto, reason="WelcomeGate autorole (GATED)")
+            except Exception:
+                pass
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        guild = member.guild
+        cfg = self.cfg(guild.id)
+        tickets = cfg.setdefault("tickets", {})
+        ch_id = tickets.get(str(member.id))
+        if ch_id:
+            ch = guild.get_channel(ch_id)
+            if isinstance(ch, discord.TextChannel):
+                try:
+                    await ch.send(
+                        f"🚪 {member.mention} left the server. Initiating ban for **age verification evasion**.",
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                except Exception:
+                    pass
+                try:
+                    await guild.ban(discord.Object(member.id), reason="age verification evasion")
+                except Exception:
+                    pass
+                await self._archive_ticket_channel(ch, reason="Member left — auto-archive (age verification evasion)")
+            tickets.pop(str(member.id), None)
+            await save_config(self.bot.config)
+            await self._log(guild, f"🚫 {member} left during verification — banned (age verification evasion).")
+
+    # ---- admin prefix commands ----
+    @commands.has_permissions(administrator=True)
+    @commands.command(name="welcomepublish")
+    async def welcomepublish_cmd(self, ctx: commands.Context):
+        """Publish or update the permanent Verify panel."""
+        guild = ctx.guild
+        if not guild:
+            return await ctx.reply("❌ Run in a guild.")
+        cfg = self.cfg(guild.id)
+        ch = resolve_channel_any(guild, cfg.get("panel_channel_id"))
+        if not isinstance(ch, discord.TextChannel):
+            # safe fallback: system channel or first writable text channel
+            ch = guild.system_channel if isinstance(guild.system_channel, discord.TextChannel) else None
+            if not ch:
+                for c in guild.text_channels:
+                    p = c.permissions_for(guild.me)
+                    if p.read_messages and p.send_messages:
+                        ch = c
+                        break
+        if not isinstance(ch, discord.TextChannel):
+            return await ctx.reply("🚫 No channel to post the panel. Set 'Panel Channel' in !welcomepanel.")
+
+        embed = self._panel_embed(guild)
+        view = WelcomePanelView(self)
+
+        msg = None
+        if isinstance(cfg.get("panel_message_id"), int):
+            try:
+                msg = await ch.fetch_message(cfg["panel_message_id"])
+            except Exception:
+                msg = None
+
+        if msg:
+            await msg.edit(embed=embed, view=view)
+            await ctx.reply(f"✅ Updated panel in {ch.mention}")
+        else:
+            posted = await ch.send(embed=embed, view=view)
+            cfg["panel_channel_id"] = ch.id
+            cfg["panel_message_id"] = posted.id
+            await save_config(self.bot.config)
+            await ctx.reply(f"✅ Published panel in {ch.mention}")
+
+    @commands.has_permissions(administrator=True)
+    @commands.command(name="welcomepanel")
+    async def welcomepanel_cmd(self, ctx: commands.Context):
+        """Open the modal-only config console (ephemeral pickers)."""
+        view = WelcomeConfigView(self, ctx)
+        msg = await ctx.send(
+            embed=discord.Embed(title="Welcome Gate — Config", description="Loading…", color=discord.Color.blurple()),
+            view=view,
+        )
+        view.panel_message = msg
+        await view.render()
+
+    # ---- panel embed ----
+    def _panel_embed(self, guild: discord.Guild) -> discord.Embed:
+        cfg = self.cfg(guild.id)
+        msg = cfg.get("message") or {}
+        emb = discord.Embed(
+            title=(msg.get("title") or "Welcome!"),
+            description=(msg.get("description") or "").replace("{mention}", "{mention}"),
+            color=discord.Color.blurple(),
+            timestamp=utcnow(),
+        )
+        if msg.get("image_url"):
+            emb.set_image(url=msg["image_url"])
+        emb.set_footer(text="Enter DOB and press Age Check")
+        return emb
+
+    # ---- jail & ticket ----
     async def _jail_and_open_id_ticket(self, member: discord.Member):
         guild = member.guild
         cfg = self.cfg(guild.id)
@@ -340,7 +603,7 @@ class WelcomeGate(commands.Cog):
             await self._log(guild, f"⚠️ jailed_role_id not set; cannot jail {member.mention}.")
             return
 
-        # strip manageable roles
+        # Strip manageable roles (keep @everyone)
         to_remove = [r for r in member.roles if not r.is_default() and can_manage_role(guild, r)]
         if to_remove:
             try:
@@ -354,11 +617,9 @@ class WelcomeGate(commands.Cog):
             except Exception:
                 pass
 
-        # create ticket in hard-coded category
         channel = await self._create_ticket_channel(member)
         if channel:
             await self._post_ticket_intro(channel, member)
-            # remember for leave handling
             cfg.setdefault("tickets", {})[str(member.id)] = channel.id
             await save_config(self.bot.config)
 
@@ -428,13 +689,12 @@ class WelcomeGate(commands.Cog):
                 embed=emb,
                 allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False),
             )
-            # Add close button for staff
             await channel.send(view=TicketCloseView(self))
         except Exception:
             pass
 
     async def _archive_ticket_channel(self, channel: discord.TextChannel, reason: str = "Closed"):
-        # Deny everyone including member; lock posting; rename with -closed
+        # lock down and rename with -closed
         try:
             overwrites = channel.overwrites
             for target, pw in list(overwrites.items()):
@@ -445,24 +705,9 @@ class WelcomeGate(commands.Cog):
             pass
         await self._log(channel.guild, f"📦 Archived ticket {channel.mention}: {reason}")
 
-    # --- ticket close command (fallback) ---
-    @commands.has_permissions(manage_channels=True)
-    @commands.hybrid_command(name="closeticket", description="Close the current ticket.")
-    async def closeticket_cmd(self, ctx: commands.Context):
-        if not isinstance(ctx.channel, discord.TextChannel):
-            return await ctx.reply("❌ Run inside a ticket channel.")
-        await self._archive_ticket_channel(ctx.channel, reason=f"Closed by {ctx.author}")
-        # drop from index if it was tracked
-        cfg = self.cfg(ctx.guild.id)
-        for uid, cid in list(cfg.get("tickets", {}).items()):
-            if cid == ctx.channel.id:
-                cfg["tickets"].pop(uid, None)
-                await save_config(self.bot.config)
-                break
-
 
 class TicketCloseView(discord.ui.View):
-    """Small view to close ticket; staff/security only (permission-gated)."""
+    """Close ticket (staff/security or Manage Channels)."""
     def __init__(self, cog: WelcomeGate):
         super().__init__(timeout=0)
         self.cog = cog
@@ -473,7 +718,6 @@ class TicketCloseView(discord.ui.View):
     async def _close(self, interaction: discord.Interaction):
         if not isinstance(interaction.channel, discord.TextChannel):
             return await interaction.response.send_message("❌ Not a text channel.", ephemeral=True)
-        # basic gate: needs manage_channels OR has security/staff role
         guild = interaction.guild
         cfg = self.cog.cfg(guild.id)
         allowed = interaction.user.guild_permissions.manage_channels
@@ -486,7 +730,8 @@ class TicketCloseView(discord.ui.View):
             return await interaction.response.send_message("❌ You cannot close tickets.", ephemeral=True)
         await interaction.response.send_message("Archiving…", ephemeral=True)
         await self.cog._archive_ticket_channel(interaction.channel, reason=f"Closed by {interaction.user}")
-        # remove index entry if present
+        # cleanup index
+        cfg = self.cog.cfg(guild.id)
         for uid, cid in list(cfg.get("tickets", {}).items()):
             if cid == interaction.channel.id:
                 cfg["tickets"].pop(uid, None)
