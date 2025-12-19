@@ -214,40 +214,22 @@
 {
   "age_gate": {
     "enabled": true,
-
-    "log_channel_id": 1438922658636107847,
-
-    "roles": {
-      "gated": { "id": null, "name": "GATED" },
-      "member": { "id": null, "name": "Member" },
-      "jailed": { "id": null, "name": "jailed" },
-      "security": { "id": null, "name": "Security" },
-      "staff": { "id": null, "name": "Staff" }
-    },
-
     "min_age": 18,
-    "passcode_timeout_hours": 48,
-    "passcode_attempts": 4,
-
-    "verify_button_custom_id": "welcome_gate:age_check",
-    "ticket_category_id": 1400849393652990083,
-    "ticket_prefix": "id-verify",
-
-    "welcome_embed": {
+    "passcode": { "timeout_hours": 48, "max_attempts": 4 },
+    "panel": {
       "title": "Welcome!",
       "description": "Please begin verification by pressing **Age Check** below.\n\n❗ **Warning:** The DOB you provide must match your ID during verification, or a ban may be enforced.",
-      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451675296356106412/dopmine.png?ex=69470979&is=6945b7f9&hm=9efc6616444af77651283979ff34a3552e513c5743e54d4b164b9e9db4cad230&=&format=webp&quality=lossless&width=3044&height=1712"
+      "image_url": "https://your-image.example/panel.png"
     },
-
-    "passcode_embed": {
-      "title": "Your Passcode",
-      "description": "Use the **Enter Passcode** button below to open a popup and submit this code.\n\n**Code:** `{code}`\nExpires in **{timeout_h}h**.\n\n⚠️ The DOB you provided must match your ID during verification, otherwise a ban may be enforced.",
-      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451567820944052286/Where_Thick_Thighs_Meet_SSRIs_20251219_073130_0000.png?ex=6946a561&is=694553e1&hm=ff7072adbe8b0c0c64675bb6a54471b7a88920dd8b63d08e1744e6c6238b412e&=&format=webp&quality=lossless&width=2996&height=1712"
+    "roles": {
+      "gated": "GATED",
+      "member": "Member",
+      "jailed": "jailed",
+      "staff_ping": ["Staff", "SECURITY"]
     },
-
-    "staff_ping_roles": [
-      "Security",
-      "Staff"]
+    "channels": {
+      "log_channel_id": 1438922658636107847,
+      "ticket_category_id": 1400849393652990083
+    }
   }
 }
-  }
