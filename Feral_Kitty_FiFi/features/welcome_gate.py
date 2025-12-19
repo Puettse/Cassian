@@ -5,48 +5,16 @@ import random
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Any, List
 
 import discord
 from discord.ext import commands, tasks
 
-
-# ===== HARD-CODED CONSTANTS =====
-TICKET_CATEGORY_ID = 1400849393652990083         # [Req. Verify] category
-LOG_CHANNEL_ID     = 1438922658636107847         # gateway logs
-
-ROLE_GATED_NAME    = "GATED"
-ROLE_MEMBER_NAME   = "Member"
-ROLE_JAILED_NAME   = "jailed"
-ROLE_SECURITY_NAME = "Security"
-ROLE_STAFF_NAME    = "Staff"
-
-MIN_AGE             = 18
-PASSCODE_TIMEOUT_H  = 48
-PASSCODE_ATTEMPTS   = 4
-
-VERIFY_BTN_ID       = "welcome_gate:age_check"   # persistent
-TICKET_PREFIX       = "id-verify"
-
-WELCOME_TITLE = "Welcome!"
-WELCOME_DESC  = (
-    "Please begin verification by pressing **Age Check** below.\n\n"
-    "❗ **Warning:** The DOB you provide must match your ID during verification, "
-    "or a ban may be enforced."
-)
-WELCOME_IMAGE_URL = "https://media.discordapp.net/attachments/1400677535980978246/1451675296356106412/dopmine.png?ex=69470979&is=6945b7f9&hm=9efc6616444af77651283979ff34a3552e513c5743e54d4b164b9e9db4cad230&=&format=webp&quality=lossless&width=3044&height=1712"
-
-PASSCODE_TITLE = "Your Passcode"
-PASSCODE_DESC  = (
-    "Use the **Enter Passcode** button below to open a popup and submit this code.\n\n"
-    "**Code:** `{code}`\n"
-    f"Expires in **{PASSCODE_TIMEOUT_H}h**.\n\n"
-    "⚠️ The DOB you provided must match your ID during verification, otherwise a ban may be enforced."
-)
-PASSCODE_IMAGE_URL = "https://media.discordapp.net/attachments/1400677535980978246/1451567820944052286/Where_Thick_Thighs_Meet_SSRIs_20251219_073130_0000.png?ex=6946a561&is=694553e1&hm=ff7072adbe8b0c0c64675bb6a54471b7a88920dd8b63d08e1744e6c6238b412e&=&format=webp&quality=lossless&width=2996&height=1712"
+from ..config import save_config  # if you later persist ticket state
+from ..utils.discord_resolvers import resolve_channel_any, resolve_role_any
 
 
-# ===== HELPERS =====
+# ===== helpers =====
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -59,6 +27,9 @@ def _slug_username(member: discord.Member) -> str:
 def _parse_yyyy_mm_dd(s: str) -> Optional[date]:
     try:
         y, m, d = [int(p) for p in s.strip().split("-")]
+        # small sanity guard on year
+        if y < 1900 or y > utcnow().year:
+            return None
         return date(y, m, d)
     except Exception:
         return None
@@ -70,19 +41,43 @@ def _calc_age(dob: date, today: Optional[date] = None) -> int:
         years -= 1
     return years
 
-def _resolve_role_by_name(guild: discord.Guild, name: str) -> Optional[discord.Role]:
-    low = (name or "").lower()
-    for r in guild.roles:
-        if r.name.lower() == low:
-            return r
-    return None
-
 def _can_manage_role(guild: discord.Guild, role: discord.Role) -> bool:
     me = guild.me
-    return bool(me) and role < me.top_role and not role.is_default()
+    return bool(me) and role < me.top_role and not role.is_default() and not role.managed
+
+# config access
+def _cfg(bot: commands.Bot) -> Dict[str, Any]:
+    return bot.config.setdefault("age_gate", {})  # all keys provided in data/config.json
+
+def _cfg_int(dct: Dict[str, Any], key: str, default: int) -> int:
+    val = dct.get(key, default)
+    try:
+        return int(val)
+    except Exception:
+        return default
+
+def _resolve_role_cfg(guild: discord.Guild, entry: Dict[str, Any]) -> Optional[discord.Role]:
+    """entry is like {"id": 123} or {"name": "Staff"}."""
+    if not entry: return None
+    rid = entry.get("id")
+    if isinstance(rid, int):
+        r = guild.get_role(rid)
+        if r: return r
+    name = entry.get("name")
+    if isinstance(name, str) and name.strip():
+        return resolve_role_any(guild, name.strip())
+    return None
+
+def _resolve_ping_mentions(guild: discord.Guild, tokens: List[Any]) -> List[str]:
+    """mix of ids/names; returns role mentions that exist."""
+    out = []
+    for tok in tokens or []:
+        r = resolve_role_any(guild, tok)
+        if r: out.append(r.mention)
+    return out
 
 
-# ===== RUNTIME =====
+# ===== runtime containers =====
 @dataclass
 class Challenge:
     user_id: int
@@ -94,20 +89,20 @@ class Challenge:
         return utcnow() >= self.expires_at
 
 
-# ===== VIEWS & MODALS =====
+# ===== UI components =====
 class WelcomePanelView(discord.ui.View):
     """Persistent 'Age Check' button; used on the public panel in the GATED channel."""
     def __init__(self, cog: "WelcomeGate"):
         super().__init__(timeout=None)
         self.cog = cog
-        btn = discord.ui.Button(label="Age Check", style=discord.ButtonStyle.primary, custom_id=VERIFY_BTN_ID)
+        custom_id = _cfg(self.cog.bot).get("verify_button_custom_id") or "welcome_gate:age_check"
+        btn = discord.ui.Button(label="Age Check", style=discord.ButtonStyle.primary, custom_id=custom_id)
         btn.callback = self._on_age_check_clicked
         self.add_item(btn)
 
     async def _on_age_check_clicked(self, interaction: discord.Interaction):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
-        # Open DOB modal directly (panel lives in GATED channel; no private verify channel step)
         await interaction.response.send_modal(AgeModal(self.cog, interaction.guild.id, interaction.user.id))
 
 
@@ -139,17 +134,18 @@ class AgeModal(discord.ui.Modal):
         if not dob:
             return await interaction.response.send_message("❌ DOB must be YYYY-MM-DD.", ephemeral=True)
 
-        # Immutable log
+        # Immutable log (DOB is intentionally logged by policy)
         await self.cog._log_age_check_embed(guild, member, dob)
 
+        min_age = _cfg_int(_cfg(self.cog.bot), "min_age", 18)
         age = _calc_age(dob)
-        if age < MIN_AGE:
+        if age < min_age:
             await interaction.response.send_message(
-                f"🚫 You must be **{MIN_AGE}+**. You have been placed in **jail** and an **ID verification ticket** was opened.",
+                f"🚫 You must be **{min_age}+**. You have been placed in **jail** and an **ID verification ticket** was opened.",
                 ephemeral=True,
             )
             await self.cog._jail_and_open_ticket(member)
-            await self.cog._log(guild, f"🚨 Underage ({age}) → jailed & ticket for {member.mention}.")
+            await self.cog._log_simple(guild, f"🚨 Underage ({age}) → jailed & ticket for {member.mention}.")
             return
 
         # Adult → passcode modal flow (no channel creation)
@@ -157,7 +153,7 @@ class AgeModal(discord.ui.Modal):
         embed = self.cog._passcode_embed(guild, code)
         view = PasscodePromptView(self.cog, guild.id, member.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        await self.cog._log(guild, f"🔐 Passcode issued to {member.mention}.")
+        await self.cog._log_simple(guild, f"🔐 Passcode issued to {member.mention}.")
 
 
 class PasscodePromptView(discord.ui.View):
@@ -192,7 +188,7 @@ class PasscodeModal(discord.ui.Modal):
 
         ok, msg = await self.cog._finalize_passcode(member, self.code.value)
         await interaction.response.send_message(msg, ephemeral=True)
-        await self.cog._log(guild, f"{'✅' if ok else '❌'} Passcode result for {member.mention}: {msg}")
+        await self.cog._log_simple(guild, f"{'✅' if ok else '❌'} Passcode result for {member.mention}: {msg}")
 
 
 class TicketCloseView(discord.ui.View):
@@ -206,24 +202,30 @@ class TicketCloseView(discord.ui.View):
     async def _close(self, interaction: discord.Interaction):
         if not isinstance(interaction.channel, discord.TextChannel):
             return await interaction.response.send_message("❌ Not a text channel.", ephemeral=True)
+
         guild = interaction.guild
-        roles = getattr(interaction.user, "roles", [])
-        sec = _resolve_role_by_name(guild, ROLE_SECURITY_NAME)
-        staff = _resolve_role_by_name(guild, ROLE_STAFF_NAME)
-        allowed = interaction.user.guild_permissions.manage_channels or any(r in roles for r in (sec, staff) if r)
+        cfg = _cfg(self.cog.bot)
+        roles_cfg = cfg.get("roles", {})
+        sec = _resolve_role_cfg(guild, roles_cfg.get("security", {}))
+        staff = _resolve_role_cfg(guild, roles_cfg.get("staff", {}))
+        allowed = interaction.user.guild_permissions.manage_channels or any(
+            (sec and sec in getattr(interaction.user, "roles", [])),
+            ) or any((staff and staff in getattr(interaction.user, "roles", [])),)
+
         if not allowed:
             return await interaction.response.send_message("❌ You cannot close tickets.", ephemeral=True)
         await interaction.response.send_message("Archiving…", ephemeral=True)
         await self.cog._archive_ticket_channel(interaction.channel, reason=f"Closed by {interaction.user}")
 
 
-# ===== COG =====
+# ===== Cog =====
 class WelcomeGate(commands.Cog):
     """GATED channel panel → DOB modal → passcode (adult) OR jailed+ticket (underage)."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._challenges: Dict[int, Challenge] = {}   # user_id -> Challenge
-        self._tickets: Dict[int, int] = {}            # user_id -> channel_id
+        self._tickets: Dict[int, int] = {}            # user_id -> channel_id (in-memory; used only to ping on leave)
+        self._used_codes: set[str] = set()            # basic non-reuse guard
         self._sweeper.start()
         self.bot.add_view(WelcomePanelView(self))     # persistent button
         if not getattr(self.bot, "intents", None) or not self.bot.intents.members:
@@ -234,65 +236,96 @@ class WelcomeGate(commands.Cog):
 
     # ----- Embeds / Logs -----
     def _panel_embed(self, guild: discord.Guild) -> discord.Embed:
-        emb = discord.Embed(title=WELCOME_TITLE, description=WELCOME_DESC, color=discord.Color.blurple(), timestamp=utcnow())
-        if WELCOME_IMAGE_URL:
-            emb.set_image(url=WELCOME_IMAGE_URL)
+        cfg = _cfg(self.bot)
+        w = cfg.get("welcome_embed", {}) or {}
+        emb = discord.Embed(
+            title=(w.get("title") or "Welcome!"),
+            description=(w.get("description") or "Press **Age Check** below."),
+            color=discord.Color.blurple(),
+            timestamp=utcnow(),
+        )
+        if w.get("image_url"):
+            emb.set_image(url=w["image_url"])
         return emb
 
     def _passcode_embed(self, guild: discord.Guild, code: str) -> discord.Embed:
-        desc = PASSCODE_DESC.replace("{code}", code)
-        emb = discord.Embed(title=PASSCODE_TITLE, description=desc, color=discord.Color.green(), timestamp=utcnow())
-        if PASSCODE_IMAGE_URL:
-            emb.set_image(url=PASSCODE_IMAGE_URL)
+        cfg = _cfg(self.bot)
+        p = cfg.get("passcode_embed", {}) or {}
+        desc_tpl = (p.get("description") or "Your code: `{code}` (expires in {timeout_h}h)")
+        desc = desc_tpl.replace("{code}", code).replace("{timeout_h}", str(_cfg_int(cfg, "passcode_timeout_hours", 48)))
+        emb = discord.Embed(
+            title=(p.get("title") or "Your Passcode"),
+            description=desc,
+            color=discord.Color.green(),
+            timestamp=utcnow(),
+        )
+        if p.get("image_url"):
+            emb.set_image(url=p["image_url"])
         return emb
 
-    async def _log(self, guild: discord.Guild, text: str):
-        ch = guild.get_channel(LOG_CHANNEL_ID)
+    async def _log_simple(self, guild: discord.Guild, text: str):
+        cfg = _cfg(self.bot)
+        ch = resolve_channel_any(guild, cfg.get("log_channel_id"))
         if isinstance(ch, discord.TextChannel):
             await ch.send(text, allowed_mentions=discord.AllowedMentions.none())
 
     async def _log_age_check_embed(self, guild: discord.Guild, member: discord.Member, dob: date):
-        ch = guild.get_channel(LOG_CHANNEL_ID)
+        cfg = _cfg(self.bot)
+        ch = resolve_channel_any(guild, cfg.get("log_channel_id"))
         if not isinstance(ch, discord.TextChannel):
             return
         emb = discord.Embed(title="Age Check Submitted", color=discord.Color.blurple(), timestamp=utcnow())
         emb.add_field(name="User", value=f"{member} ({member.mention})", inline=False)
         emb.add_field(name="User ID", value=str(member.id), inline=True)
+        # per your policy, log full DOB
         emb.add_field(name="DOB Entered", value=dob.isoformat(), inline=True)
-        emb.set_thumbnail(url=member.display_avatar.url if member.display_avatar else discord.Embed.Empty)
+        try:
+            emb.set_thumbnail(url=member.display_avatar.url)  # modern attr
+        except Exception:
+            pass
         await ch.send(embed=emb, allowed_mentions=discord.AllowedMentions.none())
 
-    # ----- Challenge -----
+    # ----- Challenge lifecycle -----
     def _gen_code(self) -> str:
+        for _ in range(200):
+            code = f"{random.randint(0, 999_999):06d}"
+            if code not in self._used_codes and all(ch.code != code for ch in self._challenges.values()):
+                return code
         return f"{random.randint(0, 999_999):06d}"
 
     def _start_or_refresh_challenge(self, member: discord.Member) -> str:
+        cfg = _cfg(self.bot)
+        timeout_h = _cfg_int(cfg, "passcode_timeout_hours", 48)
         code = self._gen_code()
         self._challenges[member.id] = Challenge(
             user_id=member.id,
             code=code,
-            expires_at=utcnow() + timedelta(hours=PASSCODE_TIMEOUT_H),
+            expires_at=utcnow() + timedelta(hours=timeout_h),
             attempts=0,
         )
         return code
 
     async def _finalize_passcode(self, member: discord.Member, user_code: str) -> tuple[bool, str]:
         guild = member.guild
+        cfg = _cfg(self.bot)
+        attempts_max = _cfg_int(cfg, "passcode_attempts", 4)
+
         ch = self._challenges.get(member.id)
         if not ch or ch.expired():
             self._challenges.pop(member.id, None)
             return False, "⏱️ Session expired. Press **Age Check** again."
-        if ch.attempts >= PASSCODE_ATTEMPTS:
+        if ch.attempts >= attempts_max:
             self._challenges.pop(member.id, None)
             return False, "❌ Attempts exceeded. Contact staff."
         if (user_code or "").strip() != ch.code:
             ch.attempts += 1
-            remain = PASSCODE_ATTEMPTS - ch.attempts
+            remain = attempts_max - ch.attempts
             return False, f"❌ Incorrect. Attempts left: **{remain}**."
 
         # Success → remove GATED, grant Member
-        gated = _resolve_role_by_name(guild, ROLE_GATED_NAME)
-        member_role = _resolve_role_by_name(guild, ROLE_MEMBER_NAME)
+        roles_cfg = cfg.get("roles", {}) or {}
+        gated = _resolve_role_cfg(guild, roles_cfg.get("gated", {}))
+        member_role = _resolve_role_cfg(guild, roles_cfg.get("member", {}))
         if gated and _can_manage_role(guild, gated) and gated in member.roles:
             try: await member.remove_roles(gated, reason="WelcomeGate verified — remove GATED")
             except Exception: pass
@@ -300,15 +333,19 @@ class WelcomeGate(commands.Cog):
             try: await member.add_roles(member_role, reason="WelcomeGate verified — grant Member")
             except Exception: pass
 
+        self._used_codes.add(ch.code)
         self._challenges.pop(member.id, None)
-        await self._log(guild, f"✅ {member.mention} verified (passcode).")
+        await self._log_simple(guild, f"✅ {member.mention} verified (passcode).")
         return True, "✅ Verified. Welcome!"
 
     # ----- Ticket helpers (underage only) -----
     async def _jail_and_open_ticket(self, member: discord.Member):
         guild = member.guild
+        cfg = _cfg(self.bot)
+        roles_cfg = cfg.get("roles", {}) or {}
+
         # strip manageable roles; add JAILED
-        jailed = _resolve_role_by_name(guild, ROLE_JAILED_NAME)
+        jailed = _resolve_role_cfg(guild, roles_cfg.get("jailed", {}))
         if jailed:
             to_remove = [r for r in member.roles if not r.is_default() and _can_manage_role(guild, r)]
             if to_remove:
@@ -318,18 +355,18 @@ class WelcomeGate(commands.Cog):
                 try: await member.add_roles(jailed, reason="WelcomeGate age check failed → jail")
                 except Exception: pass
         else:
-            await self._log(guild, f"⚠️ JAILED role '{ROLE_JAILED_NAME}' not found; cannot jail {member.mention}.")
+            await self._log_simple(guild, f"⚠️ JAILED role not found; cannot jail {member.mention}.")
 
-        # create private id-verify-<user> ticket under category
-        category = guild.get_channel(TICKET_CATEGORY_ID)
-        if not isinstance(category, discord.CategoryChannel):
-            return await self._log(guild, "⚠️ Ticket category missing or invalid.")
+        # create private id-verify ticket under configured category
+        cat = resolve_channel_any(guild, cfg.get("ticket_category_id"))
+        if not isinstance(cat, discord.CategoryChannel):
+            return await self._log_simple(guild, "⚠️ Ticket category missing or invalid.")
 
         overwrites: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
         overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
 
-        sec = _resolve_role_by_name(guild, ROLE_SECURITY_NAME)
-        staff = _resolve_role_by_name(guild, ROLE_STAFF_NAME)
+        sec = _resolve_role_cfg(guild, roles_cfg.get("security", {}))
+        staff = _resolve_role_cfg(guild, roles_cfg.get("staff", {}))
         mod_pw = discord.PermissionOverwrite(
             view_channel=True, send_messages=True, read_message_history=True, attach_files=True, manage_messages=True
         )
@@ -340,23 +377,22 @@ class WelcomeGate(commands.Cog):
             view_channel=True, send_messages=True, read_message_history=True, attach_files=True
         )
 
-        base = f"{TICKET_PREFIX}-{_slug_username(member)}"
+        prefix = str(cfg.get("ticket_prefix") or "id-verify")
+        base = f"{prefix}-{_slug_username(member)}"
         name = base; i = 1
         while discord.utils.get(guild.text_channels, name=name) is not None:
             i += 1; name = f"{base}-{i}"
 
         try:
             ch = await guild.create_text_channel(
-                name=name, category=category, overwrites=overwrites,
+                name=name, category=cat, overwrites=overwrites,
                 reason=f"Age verification required for {member} ({member.id})"
             )
         except Exception:
             return
 
         # post intro + close button, ping roles
-        sec_r = _resolve_role_by_name(guild, ROLE_SECURITY_NAME)
-        staff_r = _resolve_role_by_name(guild, ROLE_STAFF_NAME)
-        pings = " ".join(x.mention for x in (sec_r, staff_r) if x) or ""
+        pings = " ".join(_resolve_ping_mentions(guild, cfg.get("staff_ping_roles") or []))
         emb = discord.Embed(
             title="ID Verification Required",
             description=(
@@ -385,45 +421,50 @@ class WelcomeGate(commands.Cog):
             await channel.edit(name=f"{channel.name}-closed", overwrites=overwrites, reason=reason)
         except Exception:
             pass
-        await self._log(channel.guild, f"📦 Archived ticket {channel.mention}: {reason}")
+        await self._log_simple(channel.guild, f"📦 Archived ticket {channel.mention}: {reason}")
 
     # ----- Events -----
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
-        gated = _resolve_role_by_name(member.guild, ROLE_GATED_NAME)
+        cfg = _cfg(self.bot)
+        if not cfg.get("enabled", True):
+            return
+        gated = _resolve_role_cfg(member.guild, (cfg.get("roles", {}) or {}).get("gated", {}))
         if gated and _can_manage_role(member.guild, gated):
             try: await member.add_roles(gated, reason="WelcomeGate autorole (GATED)")
             except Exception: pass
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
+        """No auto-ban. We just notify staff if they had an open verification ticket."""
         guild = member.guild
         ch_id = self._tickets.pop(member.id, None)
         if ch_id:
-            ch = guild.get_channel(ch_id)
-            if isinstance(ch, discord.TextChannel):
-                try:
-                    await ch.send("🚪 User left. Initiating ban for **age verification evasion**.", allowed_mentions=discord.AllowedMentions.none())
-                except Exception: pass
-                try: await guild.ban(discord.Object(member.id), reason="age verification evasion")
-                except Exception: pass
-                await self._archive_ticket_channel(ch, reason="Member left — auto-archive (age verification evasion)")
-            await self._log(guild, f"🚫 {member} left during verification — banned (age verification evasion).")
+            pings = " ".join(_resolve_ping_mentions(guild, _cfg(self.bot).get("staff_ping_roles") or []))
+            await self._log_simple(guild, f"🚪 {member} left during verification. {pings}".strip())
 
     # ----- Background cleanup -----
     @tasks.loop(minutes=5)
     async def _sweeper(self):
+        # expire challenges; keep small used_codes memory
         expired = [uid for uid, ch in list(self._challenges.items()) if ch.expired()]
         for uid in expired:
+            self._used_codes.add(self._challenges[uid].code)
             self._challenges.pop(uid, None)
+        if len(self._used_codes) > 10000:
+            for _ in range(2500):
+                try:
+                    self._used_codes.pop()
+                except KeyError:
+                    break
 
     @_sweeper.before_loop
     async def _before_sweeper(self):
         await self.bot.wait_until_ready()
 
-    # ----- Admin command: publish/update panel (run with `$welcome`) -----
+    # ----- Admin command: publish/update panel (run with !welcome) -----
     @commands.has_permissions(administrator=True)
-    @commands.command(name="welcome")  # call with $welcome
+    @commands.command(name="welcome")  # call with !welcome
     async def publish_panel(self, ctx: commands.Context):
         if not isinstance(ctx.channel, discord.TextChannel):
             return await ctx.reply("❌ Run in a text channel.")
@@ -435,8 +476,14 @@ class WelcomeGate(commands.Cog):
         try:
             async for m in ctx.channel.history(limit=50):
                 if m.author.id == ctx.bot.user.id and m.components:
-                    if any(getattr(c, "custom_id", None) == VERIFY_BTN_ID for row in m.components for c in row.children):
-                        msg_to_edit = m
+                    # look for our custom_id
+                    try:
+                        for row in m.components:
+                            for c in getattr(row, "children", []):
+                                if getattr(c, "custom_id", None) == (_cfg(self.bot).get("verify_button_custom_id") or "welcome_gate:age_check"):
+                                    msg_to_edit = m
+                                    raise StopIteration
+                    except StopIteration:
                         break
         except Exception:
             msg_to_edit = None
@@ -449,6 +496,6 @@ class WelcomeGate(commands.Cog):
             await ctx.reply("✅ Published Verify panel here.")
 
 
-# ===== EXTENSION ENTRYPOINT =====
+# ===== extension entrypoint =====
 async def setup(bot: commands.Bot):
     await bot.add_cog(WelcomeGate(bot))
