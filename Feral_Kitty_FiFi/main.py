@@ -30,6 +30,7 @@ EXTENSIONS = [
     "Feral_Kitty_FiFi.features.reminders",  
     "Feral_Kitty_FiFi.features.welcome_gate",
     "Feral_Kitty_FiFi.features.scheduler",
+    "Feral_Kitty_FiFi.features.channel_builder",
 ]
 
 @bot.event
