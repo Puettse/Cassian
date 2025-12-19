@@ -212,24 +212,32 @@
     "records": []
   }
 {
-  "age_gate": {
+  "welcome_gate2": {
     "enabled": true,
     "min_age": 18,
-    "passcode": { "timeout_hours": 48, "max_attempts": 4 },
     "panel": {
       "title": "Welcome!",
-      "description": "Please begin verification by pressing **Age Check** below.\n\n❗ **Warning:** The DOB you provide must match your ID during verification, or a ban may be enforced.",
-      "image_url": "https://your-image.example/panel.png"
+      "description": "Please begin verification by pressing **Age Check** below.\n\n❗ **Warning:** The DOB you provide must match your ID during verification.",
+      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451675296356106412/dopmine.png"
+    },
+    "passcode": {
+      "timeout_hours": 48,
+      "max_attempts": 4,
+      "title": "Your Passcode",
+      "description": "Use **Enter Passcode** to submit this code.\n**Code:** `{code}`\nExpires in **{timeout_h}h**.",
+      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451567820944052286/Where_Thick_Thighs_Meet_SSRIs.png"
     },
     "roles": {
       "gated": "GATED",
       "member": "Member",
       "jailed": "jailed",
-      "staff_ping": ["Staff", "SECURITY"]
+      "staff_names": ["Staff", "Security"],
+      "staff_ids": []
     },
-    "channels": {
-      "log_channel_id": 1438922658636107847,
-      "ticket_category_id": 1400849393652990083
-    }
+    "ids": {
+      "ticket_category_id": 1400849393652990083,
+      "log_channel_id": 1438922658636107847
+    },
+    "button_custom_id": "welcome_gate:age_check"
   }
 }
