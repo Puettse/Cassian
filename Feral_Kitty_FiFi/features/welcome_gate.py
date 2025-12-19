@@ -527,3 +527,11 @@ class AppealView(discord.ui.View):
             "On join, you’ll be **jailed** until Security/Staff review your ID.",
             ephemeral=True,
         )
+# discord.py v2+ (preferred)
+async def setup(bot: commands.Bot):
+    """Extension entrypoint required by discord.py: adds the cog."""
+    await bot.add_cog(WelcomeGate(bot))
+
+# If you're on older discord.py that expects a sync entrypoint, use this instead:
+# def setup(bot: commands.Bot):
+#     bot.add_cog(WelcomeGate(bot))
