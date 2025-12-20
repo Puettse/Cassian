@@ -93,8 +93,12 @@ def tickets_cfg(bot: commands.Bot) -> Dict[str, Any]:
     return cfg
 
 def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
-    # Inject 3 verification options if missing (value keys are canonical).
-    have = {str(o.get("value", "")).lower() for o in (cfg.get("panel_options") or [])}
+    """Add verification options only once — no duplicates."""
+    if "panel_options" not in cfg or not isinstance(cfg["panel_options"], list):
+        cfg["panel_options"] = []
+
+    existing = {str(o.get("value", "")).lower() for o in cfg["panel_options"]}
+
     defaults = [
         {
             "label": "ID VERIFY",
@@ -130,9 +134,18 @@ def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
             "staff_role_ids": [],
         },
     ]
-    for opt in defaults:
-        if opt["value"] not in have:
-            cfg.setdefault("panel_options", []).insert(0, opt)
+
+    # Only add missing ones
+    for d in defaults:
+        if d["value"].lower() not in existing:
+            cfg["panel_options"].append(d)
+
+    # Clean up duplicates if any exist
+    seen = set()
+    cfg["panel_options"] = [
+        o for o in cfg["panel_options"]
+        if not (o.get("value", "").lower() in seen or seen.add(o.get("value", "").lower()))
+    ]
 
 def _option_for_value(cfg: Dict[str, Any], value: str) -> Optional[Dict[str, Any]]:
     value = str(value).lower()
