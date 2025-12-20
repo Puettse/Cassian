@@ -5,7 +5,7 @@ import random
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 
 import discord
 from discord.ext import commands, tasks
@@ -67,12 +67,21 @@ DEFAULT_CFG: Dict[str, Any] = {
         "gated": "GATED",
         "member": "Member",
         "jailed": "jailed",
-        "staff_names": ["Staff", "Security"],   # looked up by name and/or ID supported below
-        "staff_ids": []                         # optional concrete IDs
+        "staff_names": ["Staff", "Security"],
+        "staff_ids": []
     },
     "ids": {
-        "ticket_category_id": 1400849393652990083,             # required for under-age tickets
-        "log_channel_id": 1451663490308771981                  # optional but recommended
+        # Under-age verification ticket destination (Category ID). If missing/invalid, we will infer from tickets.panel_options.
+        "ticket_category_id": 1400849393652990083,
+        # Log channel for audit entries
+        "log_channel_id": 1451663490308771981,
+        # Channel where the under-age prompt with buttons should be posted
+        "fail_prompt_channel_id": 1438582972545503233
+    },
+    # Behavior toggles for under-age flow
+    "fail_behavior": {
+        "dm_user": True,                # DM the user on failure with 24h notice
+        "ticket_ping_staff": True       # When a ticket is created via the buttons, ping staff roles in that ticket
     },
     "button_custom_id": "welcome_gate:age_check"
 }
@@ -115,8 +124,8 @@ def _find_role_by_name_or_id(guild: discord.Guild, token: Any) -> Optional[disco
             return r
     return None
 
-def _staff_roles(guild: discord.Guild, cfg: Dict[str, Any]) -> list[discord.Role]:
-    out: list[discord.Role] = []
+def _staff_roles(guild: discord.Guild, cfg: Dict[str, Any]) -> List[discord.Role]:
+    out: List[discord.Role] = []
     for tok in (cfg.get("roles", {}).get("staff_ids") or []):
         r = _find_role_by_name_or_id(guild, tok)
         if r: out.append(r)
@@ -171,6 +180,37 @@ class WelcomePanelView(discord.ui.View):
         await interaction.response.send_modal(AgeModal(self.cog, interaction.guild.id, interaction.user.id))
 
 
+class UnderageVerifyPromptView(discord.ui.View):
+    """Shown in a staff/user-visible channel; lets the flagged user open the right ticket."""
+    def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    async def _open_ticket(self, interaction: discord.Interaction, value: str):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ This button isn’t for you.", ephemeral=True)
+        guild = interaction.guild or self.cog.bot.get_guild(self.guild_id)
+        member = guild.get_member(self.user_id) if guild else None
+        if not (guild and member):
+            return await interaction.response.send_message("❌ Context missing.", ephemeral=True)
+
+        ok, msg = await self.cog._open_ticket_for(member, value)
+        if ok:
+            await interaction.response.send_message(f"✅ Opened: {msg}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
+
+    @discord.ui.button(label="Open ID Verify Ticket", style=discord.ButtonStyle.primary, emoji="🪪")
+    async def idv_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._open_ticket(interaction, "id_verification")
+
+    @discord.ui.button(label="Open VC Verify Ticket", style=discord.ButtonStyle.secondary, emoji="🎥")
+    async def vc_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._open_ticket(interaction, "video_verification")
+
+
 class AgeModal(discord.ui.Modal):
     def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
         super().__init__(title="Age Check", timeout=180)
@@ -197,19 +237,56 @@ class AgeModal(discord.ui.Modal):
             min_age = int(_wg_cfg(self.cog.bot).get("min_age", 18))
             age = _calc_age(dob)
             if age < min_age:
-                # jail + open ticket
-                await interaction.response.send_message(
-                    f"🚫 You must be **{min_age}+**. You’ve been placed in **jail** and a verification ticket is being opened.",
-                    ephemeral=True,
-                )
-                ok, msg = await self.cog._jail_and_open_ticket(member)
-                await _log(self.cog.bot, guild, f"{'✅' if ok else '❌'} Underage flow for {member.mention}: {msg}")
-                if not ok:
-                    # show reason to the user too
+                # jail (no auto ticket)
+                ok, _ = await self.cog._jail_user(member)
+
+                # DM user if enabled
+                fb = (_wg_cfg(self.cog.bot).get("fail_behavior") or {})
+                if fb.get("dm_user", True):
                     try:
-                        await interaction.followup.send(f"⚠️ Ticket not created: {msg}", ephemeral=True)
+                        dm = await member.create_dm()
+                        await dm.send(
+                            f"🚫 You must be **{min_age}+** to access the server.\n"
+                            f"You’ve been placed in **jail**. You have **24 hours** to complete verification.\n\n"
+                            f"Go back to the server and press one of the verification buttons in the designated channel."
+                        )
                     except Exception:
                         pass
+
+                # Ephemeral confirmation
+                await interaction.response.send_message(
+                    "You’ve been placed in **jail**. You have **24 hours** to complete ID verification. "
+                    "A message with buttons has been posted in the verification channel.",
+                    ephemeral=True,
+                )
+
+                # Post prompt with buttons in the specified channel
+                ids = (_wg_cfg(self.cog.bot).get("ids") or {})
+                prompt_channel_id = ids.get("fail_prompt_channel_id")
+                prompt_ch = resolve_channel_any(guild, prompt_channel_id) if prompt_channel_id else None
+                if isinstance(prompt_ch, discord.TextChannel):
+                    try:
+                        info = discord.Embed(
+                            title="Verification Required",
+                            description=(
+                                f"{member.mention}, you have **24 hours** to complete verification.\n"
+                                "Choose **ID VERIFY** for document review or **VC VERIFY** for a quick video verification.\n\n"
+                                "_Only you can press these buttons._"
+                            ),
+                            color=discord.Color.orange(),
+                            timestamp=datetime.now(timezone.utc),
+                        )
+                        await prompt_ch.send(
+                            embed=info,
+                            view=UnderageVerifyPromptView(self.cog, guild.id, member.id),
+                            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+                        )
+                        await _log(self.cog.bot, guild, f"🧭 Underage prompt posted for {member.mention} in {prompt_ch.mention}")
+                    except Exception:
+                        pass
+                else:
+                    await _log(self.cog.bot, guild, "❌ Underage prompt channel not found/visible.")
+
                 return
 
             # adult → passcode
@@ -277,7 +354,7 @@ class TicketCloseView(discord.ui.View):
 
 # ===== cog =====
 class WelcomeGate(commands.Cog):
-    """Welcome panel → DOB modal → Under-age: jail + ticket; Adult: passcode → roles swap."""
+    """Welcome panel → DOB modal → Under-age: jail + prompt; Adult: passcode → roles swap."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -341,7 +418,7 @@ class WelcomeGate(commands.Cog):
         )
         return code
 
-    async def _finalize_passcode(self, member: discord.Member, user_code: str) -> tuple[bool, str]:
+    async def _finalize_passcode(self, member: discord.Member, user_code: str) -> Tuple[bool, str]:
         cfg = _wg_cfg(self.bot)
         pc = cfg.get("passcode") or {}
         max_attempts = int(pc.get("max_attempts") or 4)
@@ -377,23 +454,27 @@ class WelcomeGate(commands.Cog):
     # ---- tickets (under-age) ----
     async def _find_existing_ticket_for(self, member: discord.Member) -> Optional[discord.TextChannel]:
         cat_id = (_wg_cfg(self.bot).get("ids") or {}).get("ticket_category_id")
-        cat = resolve_channel_any(member.guild, cat_id) if cat_id else None
+        # Use native resolver first
+        cat = None
+        if cat_id:
+            cat = member.guild.get_channel(cat_id) or self.bot.get_channel(cat_id)
+        if not isinstance(cat, discord.CategoryChannel) and cat_id:
+            obj = resolve_channel_any(member.guild, cat_id)
+            if isinstance(obj, discord.CategoryChannel):
+                cat = obj
         if not isinstance(cat, discord.CategoryChannel):
             return None
-        # search in that category for a channel name containing user's last-4 and user id; simpler: by permissions
         for ch in cat.text_channels:
             ow = ch.overwrites_for(member)
             if ow.view_channel:
                 return ch
         return None
 
-    async def _jail_and_open_ticket(self, member: discord.Member) -> tuple[bool, str]:
+    async def _jail_user(self, member: discord.Member) -> Tuple[bool, str]:
+        """Jail the member and strip manageable roles; no ticket creation."""
         cfg = _wg_cfg(self.bot)
-        ids = cfg.get("ids") or {}
         roles_cfg = cfg.get("roles") or {}
         guild = member.guild
-
-        # roles: jail + strip manageable
         jailed = _find_role_by_name_or_id(guild, roles_cfg.get("jailed"))
         try:
             to_remove = [r for r in member.roles if not r.is_default() and can_manage_role(guild, r)]
@@ -403,110 +484,158 @@ class WelcomeGate(commands.Cog):
             if jailed and can_manage_role(guild, jailed) and jailed not in member.roles:
                 try: await member.add_roles(jailed, reason="Under-age → jail")
                 except Exception: pass
+            return True, "jailed"
         except Exception as e:
             return False, f"role ops failed: {type(e).__name__}"
 
-        # existing ticket?
-        existing = await self._find_existing_ticket_for(member)
-        if existing:
-            try:
-                await existing.send(f"{member.mention} returned to verification.", allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-            except Exception:
-                pass
-            return True, f"ticket exists: {existing.mention}"
+    async def _open_ticket_for(self, member: discord.Member, value: str) -> Tuple[bool, str]:
+        """Create a ticket channel for the given option value ('id_verification' or 'video_verification')."""
+        guild = member.guild
+        tickets_cfg = (self.bot.config or {}).get("tickets") or {}
+        opts = tickets_cfg.get("panel_options") or []
 
-        # create ticket channel (with smart fallback)
-        cat_id = (ids or {}).get("ticket_category_id")
-        parent = resolve_channel_any(guild, cat_id) if cat_id else None
+        opt = next((o for o in opts if str(o.get("value", "")).lower() == str(value).lower()), None)
+        if not opt:
+            return False, "ticket option not available"
 
-        # If a text-channel ID was pasted by mistake, use its category
-        if isinstance(parent, discord.TextChannel) and parent.category:
-            parent = parent.category
-
-        # Fallback: infer from tickets.panel_options (prefer verification options)
+        # resolve category: prefer the option’s parent_category_id; fallback to welcome_gate2.ids.ticket_category_id
+        parent = None
+        pid = opt.get("parent_category_id")
+        if pid:
+            parent = guild.get_channel(pid) or self.bot.get_channel(pid)
+            if isinstance(parent, (discord.TextChannel, discord.Thread)) and getattr(parent, "category", None):
+                parent = parent.category
         if not isinstance(parent, discord.CategoryChannel):
-            tcfg = (self.bot.config or {}).get("tickets") or {}
-            opts = tcfg.get("panel_options") or []
-
-            for key in ("id_verification", "video_verification", "cross_verification"):
-                opt = next((o for o in opts if str(o.get("value", "")).lower() == key), None)
-                if opt and opt.get("parent_category_id"):
-                    cand = resolve_channel_any(guild, opt["parent_category_id"])
-                    if isinstance(cand, discord.CategoryChannel):
-                        parent = cand
-                        break
-
-            if not isinstance(parent, discord.CategoryChannel):
-                for o in opts:
-                    pid = o.get("parent_category_id")
-                    if pid:
-                        cand = resolve_channel_any(guild, pid)
-                        if isinstance(cand, discord.CategoryChannel):
-                            parent = cand
-                            break
-
-            # Persist the inferred category so we don’t have to infer next time
-            if isinstance(parent, discord.CategoryChannel) and not ids.get("ticket_category_id"):
-                try:
-                    cfg.setdefault("ids", {})["ticket_category_id"] = parent.id
-                    await save_config(self.bot.config)
-                except Exception:
-                    pass
-
+            wg_ids = (_wg_cfg(self.bot).get("ids") or {})
+            alt = wg_ids.get("ticket_category_id")
+            if alt:
+                parent = guild.get_channel(alt) or self.bot.get_channel(alt)
+                if isinstance(parent, (discord.TextChannel, discord.Thread)) and getattr(parent, "category", None):
+                    parent = parent.category
         if not isinstance(parent, discord.CategoryChannel):
-            return False, f"ticket category not configured/invalid (id={cat_id})"
+            return False, "ticket category not configured/invalid"
+
+        # resolve staff roles (IDs preferred, fallback to names)
+        staff_ids: List[int] = []
+        opt_ids = [int(x) for x in (opt.get("staff_role_ids") or []) if isinstance(x, int) or str(x).isdigit()]
+        opt_ids = [i for i in opt_ids if guild.get_role(i)]
+        if opt_ids:
+            staff_ids = sorted(set(opt_ids))
+        else:
+            ids = [int(x) for x in (tickets_cfg.get("staff_role_ids") or []) if isinstance(x, int) or str(x).isdigit()]
+            ids = [i for i in ids if guild.get_role(i)]
+            if ids:
+                staff_ids = sorted(set(ids))
+            else:
+                names = tickets_cfg.get("roles_to_ping_names") or []
+                for n in names:
+                    r = resolve_role_any(guild, n)
+                    if r: staff_ids.append(r.id)
+                staff_ids = sorted(set(staff_ids))
+
+        # channel name like panel: YYYYMM-last4-#### (per-category counter)
+        def yyyymm(dt=None):
+            dt = dt or datetime.now(timezone.utc)
+            return f"{dt.year:04d}{dt.month:02d}"
+        counters = tickets_cfg.setdefault("counters", {}).setdefault(yyyymm(), {})
+        seq = int(counters.get(value, 1)); counters[value] = seq + 1
+        base = f"{yyyymm()}-{member.id % 10000:04d}-{seq:04d}"
 
         overwrites: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
         overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False, read_message_history=False)
+        overwrites[member] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=True, attach_files=True, embed_links=True)
+        for rid in staff_ids:
+            r = guild.get_role(rid)
+            if r:
+                overwrites[r] = discord.PermissionOverwrite(view_channel=True, read_message_history=True, send_messages=True, attach_files=True, manage_messages=True, embed_links=True)
 
-        # opener perms
-        overwrites[member] = discord.PermissionOverwrite(
-            view_channel=True, read_message_history=True, send_messages=True, attach_files=True
-        )
-
-        # staff perms
-        for r in _staff_roles(guild, cfg):
-            overwrites[r] = discord.PermissionOverwrite(
-                view_channel=True, read_message_history=True, send_messages=True, attach_files=True, manage_messages=True
-            )
-
-        base = f"id-verify-{_slug_username(member)}"
-        name = base; i = 1
-        while discord.utils.get(guild.text_channels, name=name):
-            i += 1; name = f"{base}-{i}"
-
+        # create text channel
         try:
-            ch = await guild.create_text_channel(
-                name=name, category=parent, overwrites=overwrites or None,
-                reason=f"Under-age verification: {member} ({member.id})"
+            text_ch = await guild.create_text_channel(
+                name=base, category=parent, overwrites=overwrites or None,
+                reason=f"Ticket opened by {member} ({value})"
             )
         except discord.Forbidden:
-            return False, "no permission to create channel"
+            return False, "I lack permission to create channels"
         except discord.HTTPException as e:
-            return False, f"HTTP error: {e}"
+            return False, f"HTTP error creating channel: {e}"
 
-        # ping staff + intro + controls
-        staff_mentions = " ".join([r.mention for r in _staff_roles(guild, cfg)])
+        # optional VC
+        voice_ch = None
+        if bool(opt.get("open_voice", False)):
+            v_ow: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
+            v_ow[guild.default_role] = discord.PermissionOverwrite(connect=False, view_channel=False)
+            v_ow[member] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+            for rid in staff_ids:
+                r = guild.get_role(rid)
+                if r:
+                    v_ow[r] = discord.PermissionOverwrite(view_channel=True, connect=True, speak=True, stream=True, use_voice_activation=True)
+            try:
+                voice_ch = await guild.create_voice_channel(
+                    name=f"{base}-vc"[:100], category=parent, overwrites=v_ow or None, reason=f"Ticket voice opened by {member} ({value})"
+                )
+            except Exception:
+                voice_ch = None  # non-fatal
+
+        # intro + ping (controlled by fail_behavior.ticket_ping_staff) with explicit AllowedMentions
+        fb = (_wg_cfg(self.bot).get("fail_behavior") or {})
+        ping_staff = bool(fb.get("ticket_ping_staff", True))
+
         intro = discord.Embed(
-            title="ID Verification Required",
+            title=f"Ticket: {opt.get('label') or value}",
             description=(
-                f"{member.mention}, to remain in the server you must complete **ID Verification**.\n"
-                "• Upload a clear photo of your **government ID** and a **note** with today’s date and your Discord tag.\n"
-                "• Cover non-essential info.\n"
-                "• A moderator will review and respond here."
+                f"Opened by {member.mention} • {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}\n\n"
+                + ("🎥 **Voice channel created:** " + (voice_ch.mention if voice_ch else "_failed_") + "\n\n" if opt.get("open_voice") else "")
+                + "Provide details below."
             ),
-            color=discord.Color.orange(), timestamp=utcnow()
+            color=discord.Color.blurple(),
+            timestamp=datetime.now(timezone.utc),
         )
         try:
-            await ch.send(content=(staff_mentions or None), embed=intro,
-                          allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False))
-            await ch.send(view=TicketCloseView(self))
+            if ping_staff and staff_ids:
+                content = " ".join(f"<@&{rid}>" for rid in staff_ids)
+                allowed = discord.AllowedMentions(
+                    roles=[discord.Object(id=rid) for rid in staff_ids],
+                    users=True,
+                    everyone=False,
+                )
+                await text_ch.send(content=content, embed=intro, allowed_mentions=allowed)
+            else:
+                await text_ch.send(embed=intro)
         except Exception:
             pass
 
-        # log
-        await _log(self.bot, guild, f"🎫 Created under-age verification ticket {ch.mention} for {member.mention}.")
-        return True, f"created: {ch.mention}"
+        # record basic metadata (optional, mirrors your tickets schema)
+        tickets_cfg.setdefault("records", []).append({
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "category": value,
+            "opener_name": str(member),
+            "opener_id": member.id,
+            "channel_id": text_ch.id,
+            "voice_channel_id": voice_ch.id if voice_ch else None,
+            "claimed_by_name": "",
+            "claimed_by_id": None,
+            "claimed_at": "",
+            "closed_at": "",
+            "transcript_msg_url": "",
+            "transcript_cdn_url": "",
+            "archived": True,
+        })
+        tickets_cfg.setdefault("active", {})[str(text_ch.id)] = {
+            "opener_id": member.id,
+            "value": value,
+            "opened_at": datetime.now(timezone.utc).isoformat(),
+            "claimed_by": None,
+            "claimed_at": None,
+            "verification": bool(opt.get("verification", False)),
+            "voice_channel_id": voice_ch.id if voice_ch else None,
+        }
+        try:
+            await save_config(self.bot.config)
+        except Exception:
+            pass
+
+        return True, text_ch.mention
 
     async def _archive_ticket_channel(self, channel: discord.TextChannel, reason: str = "Closed"):
         try:
