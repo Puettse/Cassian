@@ -75,13 +75,14 @@ DEFAULT_CFG: Dict[str, Any] = {
         "ticket_category_id": 1400849393652990083,
         # Log channel for audit entries
         "log_channel_id": 1451663490308771981,
-        # Channel where the under-age prompt with buttons should be posted
+        # Channel where a fallback public prompt could be posted (kept off by default)
         "fail_prompt_channel_id": 1438582972545503233
     },
     # Behavior toggles for under-age flow
     "fail_behavior": {
-        "dm_user": True,                # DM the user on failure with 24h notice
-        "ticket_ping_staff": True       # When a ticket is created via the buttons, ping staff roles in that ticket
+        "dm_user": True,                # DM the user on failure with 24h notice + buttons
+        "ticket_ping_staff": True,      # When a ticket is created via the buttons, ping staff roles in that ticket
+        "post_public_prompt": False     # If True, also post the buttons in fail_prompt_channel_id
     },
     "button_custom_id": "welcome_gate:age_check"
 }
@@ -181,7 +182,7 @@ class WelcomePanelView(discord.ui.View):
 
 
 class UnderageVerifyPromptView(discord.ui.View):
-    """Shown in a staff/user-visible channel; lets the flagged user open the right ticket."""
+    """Buttons that let the flagged user open the right ticket. Works in-channel, ephemeral, or DM."""
     def __init__(self, cog: "WelcomeGate", guild_id: int, user_id: int):
         super().__init__(timeout=None)
         self.cog = cog
@@ -189,12 +190,17 @@ class UnderageVerifyPromptView(discord.ui.View):
         self.user_id = user_id
 
     async def _open_ticket(self, interaction: discord.Interaction, value: str):
+        # Ensure only the intended user can press
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ This button isn’t for you.", ephemeral=True)
+
+        # Resolve guild + member even if the interaction is in DM (interaction.guild is None)
         guild = interaction.guild or self.cog.bot.get_guild(self.guild_id)
-        member = guild.get_member(self.user_id) if guild else None
-        if not (guild and member):
-            return await interaction.response.send_message("❌ Context missing.", ephemeral=True)
+        if not guild:
+            return await interaction.response.send_message("❌ Server context missing.", ephemeral=True)
+        member = guild.get_member(self.user_id) or await guild.fetch_member(self.user_id)
+        if not member:
+            return await interaction.response.send_message("❌ Member not found.", ephemeral=True)
 
         ok, msg = await self.cog._open_ticket_for(member, value)
         if ok:
@@ -238,55 +244,65 @@ class AgeModal(discord.ui.Modal):
             age = _calc_age(dob)
             if age < min_age:
                 # jail (no auto ticket)
-                ok, _ = await self.cog._jail_user(member)
+                await self.cog._jail_user(member)
 
-                # DM user if enabled
                 fb = (_wg_cfg(self.cog.bot).get("fail_behavior") or {})
-                if fb.get("dm_user", True):
-                    try:
-                        dm = await member.create_dm()
-                        await dm.send(
-                            f"🚫 You must be **{min_age}+** to access the server.\n"
-                            f"You’ve been placed in **jail**. You have **24 hours** to complete verification.\n\n"
-                            f"Go back to the server and press one of the verification buttons in the designated channel."
-                        )
-                    except Exception:
-                        pass
+                dm_user = bool(fb.get("dm_user", True))
+                post_public_prompt = bool(fb.get("post_public_prompt", False))
 
-                # Ephemeral confirmation
+                # Ephemeral popup with the two buttons (only visible to the user)
+                info = discord.Embed(
+                    title="Verification Required",
+                    description=(
+                        "You’ve been placed in **jail**. You have **24 hours** to complete verification.\n\n"
+                        "Choose **ID VERIFY** for document review or **VC VERIFY** for a quick video verification."
+                    ),
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(timezone.utc),
+                )
                 await interaction.response.send_message(
-                    "You’ve been placed in **jail**. You have **24 hours** to complete ID verification. "
-                    "A message with buttons has been posted in the verification channel.",
+                    embed=info,
+                    view=UnderageVerifyPromptView(self.cog, guild.id, member.id),
                     ephemeral=True,
                 )
 
-                # Post prompt with buttons in the specified channel
-                ids = (_wg_cfg(self.cog.bot).get("ids") or {})
-                prompt_channel_id = ids.get("fail_prompt_channel_id")
-                prompt_ch = resolve_channel_any(guild, prompt_channel_id) if prompt_channel_id else None
-                if isinstance(prompt_ch, discord.TextChannel):
+                # Optional: DM the same buttons so they can open a ticket from DM
+                if dm_user:
                     try:
-                        info = discord.Embed(
-                            title="Verification Required",
-                            description=(
-                                f"{member.mention}, you have **24 hours** to complete verification.\n"
-                                "Choose **ID VERIFY** for document review or **VC VERIFY** for a quick video verification.\n\n"
-                                "_Only you can press these buttons._"
+                        dm = await member.create_dm()
+                        await dm.send(
+                            embed=discord.Embed(
+                                title="Verification Required",
+                                description=(
+                                    "You have **24 hours** to complete verification.\n\n"
+                                    "Pick **ID VERIFY** or **VC VERIFY** below to open your private ticket."
+                                ),
+                                color=discord.Color.orange(),
+                                timestamp=datetime.now(timezone.utc),
                             ),
-                            color=discord.Color.orange(),
-                            timestamp=datetime.now(timezone.utc),
-                        )
-                        await prompt_ch.send(
-                            embed=info,
                             view=UnderageVerifyPromptView(self.cog, guild.id, member.id),
-                            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False)
+                            allowed_mentions=discord.AllowedMentions.none(),
                         )
-                        await _log(self.cog.bot, guild, f"🧭 Underage prompt posted for {member.mention} in {prompt_ch.mention}")
                     except Exception:
                         pass
-                else:
-                    await _log(self.cog.bot, guild, "❌ Underage prompt channel not found/visible.")
 
+                # (Optional) public prompt in a channel if you still want it
+                if post_public_prompt:
+                    ids = (_wg_cfg(self.cog.bot).get("ids") or {})
+                    prompt_channel_id = ids.get("fail_prompt_channel_id")
+                    prompt_ch = resolve_channel_any(guild, prompt_channel_id) if prompt_channel_id else None
+                    if isinstance(prompt_ch, discord.TextChannel):
+                        try:
+                            await prompt_ch.send(
+                                embed=info,
+                                view=UnderageVerifyPromptView(self.cog, guild.id, member.id),
+                                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                            )
+                        except Exception:
+                            pass
+
+                # audit log
+                await _log(self.cog.bot, guild, f"🧭 Underage prompt issued (ephemeral/DM) for {member.mention}")
                 return
 
             # adult → passcode
@@ -354,7 +370,7 @@ class TicketCloseView(discord.ui.View):
 
 # ===== cog =====
 class WelcomeGate(commands.Cog):
-    """Welcome panel → DOB modal → Under-age: jail + prompt; Adult: passcode → roles swap."""
+    """Welcome panel → DOB modal → Under-age: jail + (ephemeral & DM buttons); Adult: passcode → roles swap."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -496,7 +512,21 @@ class WelcomeGate(commands.Cog):
 
         opt = next((o for o in opts if str(o.get("value", "")).lower() == str(value).lower()), None)
         if not opt:
-            return False, "ticket option not available"
+            # Fallback: synthesize a minimal option so we never block on tickets cog/defaults
+            v = str(value).lower()
+            if v not in {"id_verification", "video_verification"}:
+                return False, "ticket option not available"
+            opt = {
+                "label": "ID VERIFY" if v == "id_verification" else "VC VERIFY",
+                "value": v,
+                "code": "IDV" if v == "id_verification" else "VVER",
+                "parent_category_id": (_wg_cfg(self.bot).get("ids") or {}).get("ticket_category_id"),
+                "emoji": "🪪" if v == "id_verification" else "🎥",
+                "description": "ID verification" if v == "id_verification" else "Video verification",
+                "verification": True,
+                "open_voice": (v == "video_verification"),
+                "staff_role_ids": [],
+            }
 
         # resolve category: prefer the option’s parent_category_id; fallback to welcome_gate2.ids.ticket_category_id
         parent = None
@@ -534,12 +564,12 @@ class WelcomeGate(commands.Cog):
                 staff_ids = sorted(set(staff_ids))
 
         # channel name like panel: YYYYMM-last4-#### (per-category counter)
-        def yyyymm(dt=None):
+        def _yyyymm(dt=None):
             dt = dt or datetime.now(timezone.utc)
             return f"{dt.year:04d}{dt.month:02d}"
-        counters = tickets_cfg.setdefault("counters", {}).setdefault(yyyymm(), {})
+        counters = tickets_cfg.setdefault("counters", {}).setdefault(_yyyymm(), {})
         seq = int(counters.get(value, 1)); counters[value] = seq + 1
-        base = f"{yyyymm()}-{member.id % 10000:04d}-{seq:04d}"
+        base = f"{_yyyymm()}-{member.id % 10000:04d}-{seq:04d}"
 
         overwrites: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
         overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False, read_message_history=False)
@@ -619,7 +649,7 @@ class WelcomeGate(commands.Cog):
             "closed_at": "",
             "transcript_msg_url": "",
             "transcript_cdn_url": "",
-            "archived": True,
+            "archived": False,
         })
         tickets_cfg.setdefault("active", {})[str(text_ch.id)] = {
             "opener_id": member.id,
