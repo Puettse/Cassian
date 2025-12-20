@@ -1,4 +1,3 @@
-```python
 # Feral_Kitty_FiFi/features/tickets_channels.py
 from __future__ import annotations
 
@@ -1131,4 +1130,3 @@ class TicketChannelsCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TicketChannelsCog(bot))
-```
