@@ -415,10 +415,46 @@ class WelcomeGate(commands.Cog):
                 pass
             return True, f"ticket exists: {existing.mention}"
 
-        # create ticket channel
-        parent = resolve_channel_any(guild, ids.get("ticket_category_id"))
+        # create ticket channel (with smart fallback)
+        cat_id = (ids or {}).get("ticket_category_id")
+        parent = resolve_channel_any(guild, cat_id) if cat_id else None
+
+        # If a text-channel ID was pasted by mistake, use its category
+        if isinstance(parent, discord.TextChannel) and parent.category:
+            parent = parent.category
+
+        # Fallback: infer from tickets.panel_options (prefer verification options)
         if not isinstance(parent, discord.CategoryChannel):
-            return False, "ticket category not configured/invalid"
+            tcfg = (self.bot.config or {}).get("tickets") or {}
+            opts = tcfg.get("panel_options") or []
+
+            for key in ("id_verification", "video_verification", "cross_verification"):
+                opt = next((o for o in opts if str(o.get("value", "")).lower() == key), None)
+                if opt and opt.get("parent_category_id"):
+                    cand = resolve_channel_any(guild, opt["parent_category_id"])
+                    if isinstance(cand, discord.CategoryChannel):
+                        parent = cand
+                        break
+
+            if not isinstance(parent, discord.CategoryChannel):
+                for o in opts:
+                    pid = o.get("parent_category_id")
+                    if pid:
+                        cand = resolve_channel_any(guild, pid)
+                        if isinstance(cand, discord.CategoryChannel):
+                            parent = cand
+                            break
+
+            # Persist the inferred category so we don’t have to infer next time
+            if isinstance(parent, discord.CategoryChannel) and not ids.get("ticket_category_id"):
+                try:
+                    cfg.setdefault("ids", {})["ticket_category_id"] = parent.id
+                    await save_config(self.bot.config)
+                except Exception:
+                    pass
+
+        if not isinstance(parent, discord.CategoryChannel):
+            return False, f"ticket category not configured/invalid (id={cat_id})"
 
         overwrites: Dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {}
         overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False, read_message_history=False)
