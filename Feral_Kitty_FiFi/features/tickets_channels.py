@@ -1,3 +1,4 @@
+```python
 # Feral_Kitty_FiFi/features/tickets_channels.py
 from __future__ import annotations
 
@@ -989,19 +990,18 @@ class TicketChannelsCog(commands.Cog):
                 pass
 
         # Remove controls view
-       try:
-    async for m in channel.history(limit=20, oldest_first=False):
-        if m.author.id == (self.bot.user.id if self.bot.user else 0):
-            for e in m.embeds:
-                if (e.title or "").lower() == "ticket controls":
-                    try:
-                        await m.edit(view=None)
-                    except Exception:
-                        pass
-                    return  # end loop cleanly
-except Exception:
-    pass
-
+        try:
+            async for m in channel.history(limit=20, oldest_first=False):
+                if m.author.id == (self.bot.user.id if self.bot.user else 0):
+                    for e in m.embeds:
+                        if (e.title or "").lower() == "ticket controls":
+                            try:
+                                await m.edit(view=None)
+                            except Exception:
+                                pass
+                            return  # end loop cleanly
+        except Exception:
+            pass
 
         # Archive or delete
         archive = cfg.get("archive") or {}
@@ -1046,11 +1046,12 @@ except Exception:
                 break
 
         cfg.get("active", {}).pop(str(channel.id), None)
+
         import asyncio
-if asyncio.iscoroutinefunction(save_config):
-    await save_config(self.bot.config)
-else:
-    await asyncio.to_thread(save_config, self.bot.config)
+        if asyncio.iscoroutinefunction(save_config):
+            await save_config(self.bot.config)
+        else:
+            await asyncio.to_thread(save_config, self.bot.config)
 
 
     # ----------------------------
@@ -1130,3 +1131,4 @@ else:
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TicketChannelsCog(bot))
+```
