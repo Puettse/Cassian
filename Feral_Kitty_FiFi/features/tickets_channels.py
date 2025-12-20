@@ -4,7 +4,6 @@ from __future__ import annotations
 import io
 import json
 import html
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -963,6 +962,7 @@ class TicketChannelsCog(commands.Cog):
                 timestamp=datetime.now(timezone.utc),
             )
             try:
+                blob.seek(0)
                 msg = await log_ch.send(content="📦 Transcript attached.", embed=em, file=discord.File(blob, filename=fname))
                 transcript_msg_url = msg.jump_url
                 if msg.attachments:
@@ -975,6 +975,7 @@ class TicketChannelsCog(commands.Cog):
         if opener:
             try:
                 if transcript_cdn_url:
+                    blob.seek(0)
                     await opener.send(
                         content=f"Your ticket `{channel.name}` has been closed.\nResolution: {resolution or '—'}\nTranscript: {transcript_cdn_url}"
                     )
@@ -988,18 +989,19 @@ class TicketChannelsCog(commands.Cog):
                 pass
 
         # Remove controls view
-        try:
-            async for m in channel.history(limit=20, oldest_first=False):
-                if m.author.id == (self.bot.user.id if self.bot.user else 0):
-                    for e in m.embeds:
-                        if (e.title or "").lower() == "ticket controls":
-                            try:
-                                await m.edit(view=None)
-                            except Exception:
-                                pass
-                            raise StopAsyncIteration
-        except Exception:
-            pass
+       try:
+    async for m in channel.history(limit=20, oldest_first=False):
+        if m.author.id == (self.bot.user.id if self.bot.user else 0):
+            for e in m.embeds:
+                if (e.title or "").lower() == "ticket controls":
+                    try:
+                        await m.edit(view=None)
+                    except Exception:
+                        pass
+                    return  # end loop cleanly
+except Exception:
+    pass
+
 
         # Archive or delete
         archive = cfg.get("archive") or {}
@@ -1044,7 +1046,12 @@ class TicketChannelsCog(commands.Cog):
                 break
 
         cfg.get("active", {}).pop(str(channel.id), None)
-        await save_config(self.bot.config)
+        import asyncio
+if asyncio.iscoroutinefunction(save_config):
+    await save_config(self.bot.config)
+else:
+    await asyncio.to_thread(save_config, self.bot.config)
+
 
     # ----------------------------
     # XLSX report
