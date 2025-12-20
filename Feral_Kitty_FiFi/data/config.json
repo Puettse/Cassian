@@ -16,12 +16,8 @@
       "Red Guard",
       "The Father"
     ],
-    "roles_whitelist": [
-      "Staff"
-    ],
-    "blocked_roles": [
-      "jailed"
-    ],
+    "roles_whitelist": ["Staff"],
+    "blocked_roles": ["jailed"],
     "cooldown_seconds": 30,
     "lock_message": {
       "text": "!STOP! HAS BEEN CALLED; CHANNEL IS LOCKED PENDING REVIEW, PLEASE STANDBY. THANK YOU FOR YOUR PATIENCE.",
@@ -78,10 +74,7 @@
       "gated": "GATED",
       "member": "Member",
       "jailed": "jailed",
-      "staff_names": [
-        "Staff",
-        "Security"
-      ],
+      "staff_names": ["Staff", "Security"],
       "staff_ids": []
     },
     "ids": {
@@ -93,19 +86,13 @@
   "tickets": {
     "log_channel_id": 1439353009405558865,
     "staff_role_ids": [],
-    "roles_to_ping_names": [
-      "Staff",
-      "SECURITY"
-    ],
+    "roles_to_ping_names": ["Staff", "SECURITY"],
     "panel": {
       "hub_channel_id": 1400631144004976773,
-      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451601705652322466/Untitled_design.png?ex=6946c4f0&is=69457370&hm=21305b292dd9ba85088da4f852b77479aabe8bdb4a8940793ca856831c33e670&=&format=webp&quality=lossless&width=1522&height=856",
-      "title": "⛧ ＰＲ〇ＪΞＣＴ Ｄ〇ＰΛΜＩΝΞ ＴＩＣΚΞΤS ⛧",
+      "image_url": "https://media.discordapp.net/attachments/1400677535980978246/1451601705652322466/Untitled_design.png",
+      "title": "⛧ ＰＲ〇ＪΞＣＴ Ｄ〇ＰΛΜＩΝΞ ＴＩＣΚΞＴS ⛧",
       "description": "ᴛᴏ ᴏᴘᴇɴ ᴀ ᴛɪᴄᴋᴇᴛ, ᴘʀᴇꜱꜱ ᴛʜᴇ ʙᴜᴛᴛᴏɴ ʙᴇʟᴏᴡ ᴀɴᴅ ꜱᴇʟᴇᴄᴛ ᴀɴ ᴏᴘᴛɪᴏɴ ꜰʀᴏᴍ ᴛʜᴇ ᴅʀᴏᴘᴅᴏᴡɴ.",
-      "colors": [
-        "#7C3AED",
-        "#FF3D8D"
-      ]
+      "colors": ["#7C3AED", "#FF3D8D"]
     },
     "panel_options": [
       {
@@ -142,23 +129,23 @@
         "staff_role_ids": []
       },
       {
-        "label": "PARTNERSHIP",
-        "value": "partnership",
-        "code": "PART",
-        "parent_category_id": 1400849393652990083,
-        "emoji": "🤝",
-        "description": "Request a partnership review with our team.",
-        "verification": false,
-        "open_voice": false,
-        "staff_role_ids": []
-      },
-      {
         "label": "REPORT",
         "value": "report",
         "code": "RPT",
         "parent_category_id": 1400849393652990083,
         "emoji": "🚨",
         "description": "Report an issue, request a DNI, or flag safety/security concerns.",
+        "verification": false,
+        "open_voice": false,
+        "staff_role_ids": []
+      },
+      {
+        "label": "PARTNERSHIP",
+        "value": "partnership",
+        "code": "PART",
+        "parent_category_id": 1400849393652990083,
+        "emoji": "🤝",
+        "description": "Request a partnership review with our team.",
         "verification": false,
         "open_voice": false,
         "staff_role_ids": []
