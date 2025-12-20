@@ -17,7 +17,7 @@ try:
     import openpyxl
     from openpyxl.styles import Font
 except Exception:
-    openpyxl = None  # optional; used by !tickets report
+    openpyxl = None
 
 
 # ----------------------------
@@ -93,18 +93,19 @@ def tickets_cfg(bot: commands.Bot) -> Dict[str, Any]:
     cfg.setdefault("allow_user_close", False)
     cfg.setdefault("archive", {"enabled": True, "category_id": None, "rename_prefix": "closed-"})
     cfg.setdefault("transcripts", {"format": "html"})
-    _ensure_verification_defaults(cfg)
+    _ensure_ticket_defaults(cfg)
     return cfg
 
 
-def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
-    """Ensure default verification ticket types exist exactly once."""
+def _ensure_ticket_defaults(cfg: Dict[str, Any]) -> None:
+    """Ensure all default ticket options exist once and never get overwritten."""
     if "panel_options" not in cfg or not isinstance(cfg["panel_options"], list):
         cfg["panel_options"] = []
 
     existing = {str(o.get("value", "")).lower() for o in cfg["panel_options"]}
 
     defaults = [
+        # --- Verification ---
         {
             "label": "ID VERIFY",
             "value": "id_verification",
@@ -138,27 +139,55 @@ def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
             "open_voice": True,
             "staff_role_ids": [],
         },
+        # --- Support / Non-verification ---
+        {
+            "label": "REPORT",
+            "value": "report",
+            "code": "RPT",
+            "parent_category_id": None,
+            "emoji": "🚨",
+            "description": "Report an issue, request a DNI, or flag safety/security concerns.",
+            "verification": False,
+            "open_voice": False,
+            "staff_role_ids": [],
+        },
+        {
+            "label": "PARTNERSHIP",
+            "value": "partnership",
+            "code": "PART",
+            "parent_category_id": None,
+            "emoji": "🤝",
+            "description": "Request a partnership review with our team.",
+            "verification": False,
+            "open_voice": False,
+            "staff_role_ids": [],
+        },
+        {
+            "label": "PROMOTION",
+            "value": "promotion",
+            "code": "PRM",
+            "parent_category_id": None,
+            "emoji": "📣",
+            "description": "Request promo for events, socials, streaming, artwork, or adult links.",
+            "verification": False,
+            "open_voice": False,
+            "staff_role_ids": [],
+        },
     ]
 
-    # Add missing defaults
     for d in defaults:
         if d["value"].lower() not in existing:
             cfg["panel_options"].append(d)
 
-    # Remove duplicates
     seen = set()
-    unique_opts = []
-    for o in cfg["panel_options"]:
-        val = str(o.get("value", "")).lower()
-        if val not in seen:
-            seen.add(val)
-            unique_opts.append(o)
-    cfg["panel_options"] = unique_opts
+    cfg["panel_options"] = [
+        o for o in cfg["panel_options"]
+        if not (o.get("value", "").lower() in seen or seen.add(o.get("value", "").lower()))
+    ]
 
 
 # ----------------------------
-# Placeholder Cog
-# (full command implementations can be added below)
+# Cog
 # ----------------------------
 class TicketChannelsCog(commands.Cog):
     """Handles ticket panel setup, verification categories, and ticket management."""
@@ -174,12 +203,14 @@ class TicketChannelsCog(commands.Cog):
         if not opts:
             await ctx.send("No ticket panel options configured.")
             return
+
         lines = []
         for o in opts:
             lines.append(
                 f"**{o.get('label')}** (`{o.get('value')}`) "
                 f"code={o.get('code')} verification={o.get('verification')} voice={o.get('open_voice')}"
             )
+
         text = "\n".join(lines)
         msg, f = _as_text_or_file(text)
         await ctx.send(content=msg, file=f)
