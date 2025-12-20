@@ -107,9 +107,7 @@ class Safeword(commands.Cog):
                 return
         except Exception:
             pass
-        finally:
-            await self.bot.process_commands(message)
-
+        
     async def _handle_safeword(self, message: discord.Message) -> None:
         cfg = self._sw_cfg()
         ch = message.channel
