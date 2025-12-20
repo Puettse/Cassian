@@ -154,3 +154,7 @@ def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
             seen.add(val)
             new_opts.append(o)
     cfg["panel_options"] = new_opts
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(TicketChannelsCog(bot))
+
