@@ -145,16 +145,48 @@ def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
         if d["value"].lower() not in existing:
             cfg["panel_options"].append(d)
 
-    # Remove duplicates (by value)
+    # Remove duplicates
     seen = set()
-    new_opts = []
+    unique_opts = []
     for o in cfg["panel_options"]:
         val = str(o.get("value", "")).lower()
         if val not in seen:
             seen.add(val)
-            new_opts.append(o)
-    cfg["panel_options"] = new_opts
+            unique_opts.append(o)
+    cfg["panel_options"] = unique_opts
 
+
+# ----------------------------
+# Placeholder Cog
+# (full command implementations can be added below)
+# ----------------------------
+class TicketChannelsCog(commands.Cog):
+    """Handles ticket panel setup, verification categories, and ticket management."""
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @commands.has_permissions(administrator=True)
+    @commands.command(name="ticketspanel_chan")
+    async def ticketspanel_chan(self, ctx: commands.Context):
+        cfg = tickets_cfg(self.bot)
+        opts = cfg.get("panel_options", [])
+        if not opts:
+            await ctx.send("No ticket panel options configured.")
+            return
+        lines = []
+        for o in opts:
+            lines.append(
+                f"**{o.get('label')}** (`{o.get('value')}`) "
+                f"code={o.get('code')} verification={o.get('verification')} voice={o.get('open_voice')}"
+            )
+        text = "\n".join(lines)
+        msg, f = _as_text_or_file(text)
+        await ctx.send(content=msg, file=f)
+
+
+# ----------------------------
+# Setup entry point
+# ----------------------------
 async def setup(bot: commands.Bot):
     await bot.add_cog(TicketChannelsCog(bot))
-
