@@ -71,8 +71,8 @@ DEFAULT_CFG: Dict[str, Any] = {
         "staff_ids": []                         # optional concrete IDs
     },
     "ids": {
-        "ticket_category_id": None,             # required for under-age tickets
-        "log_channel_id": None                  # optional but recommended
+        "ticket_category_id": 1400849393652990083,             # required for under-age tickets
+        "log_channel_id": 1451663490308771981                  # optional but recommended
     },
     "button_custom_id": "welcome_gate:age_check"
 }
