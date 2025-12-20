@@ -93,7 +93,7 @@ def tickets_cfg(bot: commands.Bot) -> Dict[str, Any]:
     return cfg
 
 def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
-    """Add verification options only once — no duplicates."""
+    """Make sure defaults exist only once — no duplicates."""
     if "panel_options" not in cfg or not isinstance(cfg["panel_options"], list):
         cfg["panel_options"] = []
 
@@ -134,6 +134,19 @@ def _ensure_verification_defaults(cfg: Dict[str, Any]) -> None:
             "staff_role_ids": [],
         },
     ]
+
+    # Add any missing ones
+    for d in defaults:
+        if d["value"].lower() not in existing:
+            cfg["panel_options"].append(d)
+
+    # Remove duplicates if they exist
+    seen = set()
+    cfg["panel_options"] = [
+        o for o in cfg["panel_options"]
+        if not (o.get("value", "").lower() in seen or seen.add(o.get("value", "").lower()))
+    ]
+
 
     # Only add missing ones
     for d in defaults:
