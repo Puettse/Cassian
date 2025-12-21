@@ -15,6 +15,11 @@ class LockSnapshot:
     prior_send_everyone: Optional[bool]
     prior_slowmode: Optional[int]
 
+SAFE_CATEGORY_NAME = "SAFE"
+SAFE_LOG_CHANNEL_NAME = "SAFEWORD"
+SAFE_RESPONDERS_ROLE = "Safeword Responders"
+STAFF_FALLBACK_NAME = "Staff"
+
 class Safeword(commands.Cog):
     """Safeword handling: !STOP! / !Release, locking, pings, export, thanos."""
 
@@ -27,8 +32,16 @@ class Safeword(commands.Cog):
     def _sw_cfg(self) -> Dict[str, Any]:
         return (self.bot.config or {}).get("safeword") or {}
 
+    def _ensure_sw_cfg(self) -> Dict[str, Any]:
+        """Ensure safeword config dict exists on bot.config and return it (in-memory)."""
+        if not getattr(self.bot, "config", None):
+            self.bot.config = {}
+        if "safeword" not in self.bot.config:
+            self.bot.config["safeword"] = {}
+        return self.bot.config["safeword"]
+
     def _member_authorized(self, member: discord.Member, guild: discord.Guild, roles_whitelist: List[Any]) -> bool:
-        if not roles_whitelist: roles_whitelist = ["Staff"]
+        if not roles_whitelist: roles_whitelist = [STAFF_FALLBACK_NAME]
         ids = {rid for rid in roles_whitelist if isinstance(rid, int)}
         names = {normalize(rn) for rn in roles_whitelist if isinstance(rn, str)}
         return any(r.id in ids or normalize(r.name) in names for r in member.roles)
@@ -87,6 +100,91 @@ class Safeword(commands.Cog):
         except Exception:
             return "unlock-error"
 
+    # ---------------------------
+    # Provisioning helpers
+    # ---------------------------
+    async def _get_or_create_role(self, guild: discord.Guild, name: str) -> Optional[discord.Role]:
+        role = discord.utils.get(guild.roles, name=name)
+        if role:
+            return role
+        if not guild.me.guild_permissions.manage_roles:
+            return None
+        try:
+            return await aio_retry(lambda: guild.create_role(
+                name=name,
+                reason="Safeword provisioning"
+            ), ctx="create-role")
+        except Exception:
+            return None
+
+    async def _get_or_create_safe_category(self, guild: discord.Guild) -> Optional[discord.CategoryChannel]:
+        cat = discord.utils.get(guild.categories, name=SAFE_CATEGORY_NAME)
+        if cat:
+            return cat
+        if not guild.me.guild_permissions.manage_channels:
+            return None
+        try:
+            return await aio_retry(lambda: guild.create_category(
+                SAFE_CATEGORY_NAME,
+                reason="Safeword provisioning"
+            ), ctx="create-category")
+        except Exception:
+            return None
+
+    async def _get_or_create_safe_channel(self, guild: discord.Guild, category: discord.CategoryChannel) -> Optional[discord.TextChannel]:
+        chan = discord.utils.get(guild.text_channels, name=SAFE_LOG_CHANNEL_NAME)
+        if chan:
+            # Move under SAFE category if not already there
+            if chan.category_id != category.id and guild.me.guild_permissions.manage_channels:
+                try:
+                    await aio_retry(lambda: chan.edit(category=category, reason="Safeword provisioning move"), ctx="move-channel")
+                except Exception:
+                    pass
+            return chan
+        if not guild.me.guild_permissions.manage_channels:
+            return None
+        try:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            }
+            # best-effort grant Staff if present
+            staff_role = resolve_role_any(guild, STAFF_FALLBACK_NAME)
+            if staff_role:
+                overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            return await aio_retry(lambda: guild.create_text_channel(
+                SAFE_LOG_CHANNEL_NAME,
+                category=category,
+                overwrites=overwrites,
+                reason="Safeword provisioning"
+            ), ctx="create-safeword-channel")
+        except Exception:
+            return None
+
+    def _update_runtime_config(self, guild: discord.Guild, log_channel_id: int, responders_role: Optional[discord.Role]):
+        cfg = self._ensure_sw_cfg()
+        # defaults
+        cfg.setdefault("enabled", True)
+        cfg.setdefault("trigger", "!STOP!")
+        cfg.setdefault("release_trigger", "!Release")
+        cfg.setdefault("cooldown_seconds", 0)
+        cfg["log_channel_id"] = log_channel_id
+
+        # roles to ping + whitelist
+        rtps: List[Any] = cfg.get("roles_to_ping") or []
+        wl: List[Any] = cfg.get("roles_whitelist") or [STAFF_FALLBACK_NAME]
+        if responders_role and responders_role.id not in {rid for rid in rtps if isinstance(rid, int)}:
+            rtps.append(responders_role.id)
+        if responders_role and responders_role.id not in {rid for rid in wl if isinstance(rid, int)}:
+            wl.append(responders_role.id)
+        if STAFF_FALLBACK_NAME not in [r for r in wl if isinstance(r, str)]:
+            wl.append(STAFF_FALLBACK_NAME)
+
+        cfg["roles_to_ping"] = rtps
+        cfg["roles_whitelist"] = wl
+
+    # ---------------------------
+    # LISTENERS
+    # ---------------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         try:
@@ -138,6 +236,7 @@ class Safeword(commands.Cog):
             if lock_img: embed.set_image(url=lock_img)
         await aio_retry(lambda: ch.send(lock_msg if not embed else None, embed=embed), ctx="lock-message")
 
+        # --- LOGGING (updated to include pfp/timestamp/etc) ---
         log_chan_id = cfg.get("log_channel_id"); history_limit = int(cfg.get("history_limit") or 25)
         if isinstance(log_chan_id, int) and log_chan_id > 0:
             log_ch = resolve_channel_any(message.guild, log_chan_id)
@@ -145,13 +244,19 @@ class Safeword(commands.Cog):
                 fname, blob = await self._export_last_messages_json(ch, history_limit)
                 em = discord.Embed(
                     title="Safeword Triggered",
-                    description=f"Channel: {ch.mention}\nBy: {message.author.mention}\nWhen: {now_iso()}",
+                    description=f"Channel: {ch.mention}",
                     color=discord.Color.red(),
+                    timestamp=datetime.now(timezone.utc),
                 )
-                em.add_field(name="Jump", value=f"[link]({message.jump_url})", inline=False)
+                em.set_author(
+                    name=f"{message.author} • UID {message.author.id}",
+                    icon_url=message.author.display_avatar.url
+                )
+                em.add_field(name="Invoker", value=message.author.mention, inline=True)
+                em.add_field(name="Jump", value=f"[Message Link]({message.jump_url})", inline=False)
                 await aio_retry(lambda: log_ch.send(content="📦 Transcript attached.", embed=em, file=discord.File(blob, filename=fname)), ctx="export-log")
 
-        err = await self._lock_channel(ch, cfg.get("roles_whitelist") or ["Staff"])
+        err = await self._lock_channel(ch, cfg.get("roles_whitelist") or [STAFF_FALLBACK_NAME])
         if err:
             await ch.send("❌ Failed to lock channel. Staff please review logs.")
 
@@ -160,7 +265,7 @@ class Safeword(commands.Cog):
         ch = message.channel
         if not isinstance(ch, discord.TextChannel) or not isinstance(message.author, discord.Member):
             return
-        if not self._member_authorized(message.author, message.guild, cfg.get("roles_whitelist") or ["Staff"]):
+        if not self._member_authorized(message.author, message.guild, cfg.get("roles_whitelist") or [STAFF_FALLBACK_NAME]):
             await ch.send("❌ You do not have permission to release this channel.")
             return
 
@@ -171,15 +276,22 @@ class Safeword(commands.Cog):
         if rel_img: embed.set_image(url=rel_img)
         await ch.send(rel_msg if not embed else None, embed=embed)
 
+        # --- LOGGING (updated to include pfp/timestamp) ---
         log_chan_id = cfg.get("log_channel_id")
         if isinstance(log_chan_id, int) and log_chan_id > 0:
             log_ch = resolve_channel_any(message.guild, log_chan_id)
             if isinstance(log_ch, discord.TextChannel):
                 em = discord.Embed(
                     title="Safeword Release",
-                    description=f"Channel: {ch.mention}\nBy: {message.author.mention}\nWhen: {now_iso()}",
+                    description=f"Channel: {ch.mention}",
                     color=discord.Color.green(),
+                    timestamp=datetime.now(timezone.utc),
                 )
+                em.set_author(
+                    name=f"{message.author} • UID {message.author.id}",
+                    icon_url=message.author.display_avatar.url
+                )
+                em.add_field(name="Invoker", value=message.author.mention, inline=True)
                 await aio_retry(lambda: log_ch.send(embed=em), ctx="release-log")
         if err:
             await ch.send("❌ Failed to fully restore channel permissions. Staff please review logs.")
@@ -207,6 +319,60 @@ class Safeword(commands.Cog):
         except Exception:
             await ctx.send("❌ Failed to delete messages.")
 
+    # ---------------------------
+    # $dropit bootstrap command
+    # ---------------------------
+    @commands.command(name="dropit")
+    async def dropit_cmd(self, ctx: commands.Context):
+        """Provision SAFE category, SAFEWORD channel, responders role, and wire config."""
+        if not self._staff_check(ctx):
+            await ctx.send("❌ Staff only."); return
+        guild = ctx.guild
+        if not guild:
+            await ctx.send("❌ Must be used in a server."); return
+
+        # Create/get SAFE category
+        category = await self._get_or_create_safe_category(guild)
+        if not category:
+            await ctx.send("❌ Missing `Manage Channels` permission to create the SAFE category.")
+            return
+
+        # Create/get SAFEWORD channel
+        safe_ch = await self._get_or_create_safe_channel(guild, category)
+        if not safe_ch:
+            await ctx.send("❌ Missing `Manage Channels` permission to create the SAFEWORD channel.")
+            return
+
+        # Create/get responders role
+        responders = await self._get_or_create_role(guild, SAFE_RESPONDERS_ROLE)
+        if not responders:
+            await ctx.send("⚠️ Could not create/find the responders role; ensure I have `Manage Roles`.")
+        else:
+            # Ensure channel perms: allow responders, keep @everyone hidden
+            try:
+                await aio_retry(lambda: safe_ch.set_permissions(
+                    responders,
+                    view_channel=True,
+                    send_messages=True,
+                    reason="Safeword provisioning (responders access)"
+                ), ctx="grant-responders")
+            except Exception:
+                pass
+
+        # Update in-memory config
+        self._update_runtime_config(guild, safe_ch.id, responders)
+
+        # Friendly summary
+        rtps = ", ".join(
+            [getattr(resolve_role_any(guild, t), "mention", str(t)) for t in (self._sw_cfg().get("roles_to_ping") or [])]
+        )
+        await ctx.send(
+            f"✅ Provisioned:\n"
+            f"• Category: **{SAFE_CATEGORY_NAME}**\n"
+            f"• Channel: {safe_ch.mention}\n"
+            f"• Role: **{SAFE_RESPONDERS_ROLE}** (if permissions allowed)\n"
+            f"• Wired logging + pings. Roles to ping: {rtps or '—'}"
+        )
+
 async def setup(bot: commands.Bot):
     await bot.add_cog(Safeword(bot))
-
