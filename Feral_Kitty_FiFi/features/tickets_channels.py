@@ -1,4 +1,4 @@
-# Feral_Kitty_FiFi/features/tickets_channels.py (RESTORED)
+# Feral_Kitty_FiFi/features/tickets_channels.py
 from __future__ import annotations
 
 import io
@@ -18,7 +18,8 @@ try:
     import openpyxl  # optional; used by !tickets_report_xlsx
     from openpyxl.styles import Font
 except Exception:
-    openpyxl = None
+    openpyxl = None  # optional
+
 
 # ----------------------------
 # Small utils
@@ -64,6 +65,7 @@ def _as_text_or_file(text: str) -> Tuple[Optional[str], Optional[discord.File]]:
     buf.seek(0)
     return '📄 Output was long; attached as file.', discord.File(buf, filename='output.txt')
 
+
 # ----------------------------
 # Config helpers
 # ----------------------------
@@ -78,6 +80,7 @@ def tickets_cfg(bot: commands.Bot) -> Dict[str, Any]:
         'title': 'How can we help?',
         'description': 'Pick a category below to open a ticket channel.',
         'colors': ['#5865F2'],
+        # we'll also store 'message_id' once we post the panel
     })
     cfg.setdefault('panel_options', [])  # up to 6 shown
     cfg.setdefault('delete_images', {'scan_limit': 500})
@@ -143,14 +146,15 @@ def _resolve_staff_role_ids(guild: discord.Guild, cfg: Dict[str, Any]) -> List[i
             out.append(r.id)
     return sorted(set(out))
 
+
 # ----------------------------
 # UI: panel + selection -> create channel
 # ----------------------------
 class TicketSelect(discord.ui.Select):
-    """Dropdown that opens tickets. Stores only a reference to the bot for persistence safety."""
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-        cfg = tickets_cfg(bot)
+    def __init__(self, cog: 'TicketChannelsCog', hub: discord.TextChannel):
+        self.cog = cog
+        self.hub = hub
+        cfg = tickets_cfg(cog.bot)
 
         options: List[discord.SelectOption] = []
         for o in (cfg.get('panel_options') or [])[:6]:
@@ -169,7 +173,7 @@ class TicketSelect(discord.ui.Select):
             max_values=1,
             options=options,
             disabled=not bool(options),
-            custom_id='tickets:panel_select',  # stable for persistent views
+            custom_id='tickets:panel_select',
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -177,7 +181,7 @@ class TicketSelect(discord.ui.Select):
         if not interaction.guild or not isinstance(user, discord.Member):
             return await interaction.response.send_message('Only server members can open tickets.', ephemeral=True)
 
-        cfg = tickets_cfg(self.bot)
+        cfg = tickets_cfg(self.cog.bot)
         value = self.values[0]
         opt = _option_for_value(cfg, value)
         if not opt:
@@ -267,7 +271,7 @@ class TicketSelect(discord.ui.Select):
             'verification': verification,
             'voice_channel_id': voice_ch.id if voice_ch else None,
         }
-        await save_config(self.bot.config)
+        await save_config(self.cog.bot.config)
 
         # intro + ping
         mentions = []
@@ -280,12 +284,8 @@ class TicketSelect(discord.ui.Select):
         intro = discord.Embed(
             title=f'Ticket: {label}',
             description=(
-                f'Opened by {user.mention} • {ts_fmt(datetime.now(timezone.utc))}
-
-'
-                + ("🎥 **Voice channel created:** " + (voice_ch.mention if voice_ch else '_failed to create_') + "
-
-" if open_voice else '')
+                f'Opened by {user.mention} • {ts_fmt(datetime.now(timezone.utc))}\n\n'
+                + ("🎥 **Voice channel created:** " + (voice_ch.mention if voice_ch else '_failed to create_') + "\n\n" if open_voice else '')
                 + 'Provide details below.'
             ),
             color=discord.Color.blurple(),
@@ -302,15 +302,16 @@ class TicketSelect(discord.ui.Select):
 
         await interaction.response.send_message(f'✅ Ticket created: {text_ch.mention}', ephemeral=True)
 
+
 class TicketPanelView(discord.ui.View):
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, cog: 'TicketChannelsCog', hub: discord.TextChannel):
         super().__init__(timeout=None)
-        self.add_item(TicketSelect(bot)))
+        self.add_item(TicketSelect(cog, hub))
+
 
 # ----------------------------
-# Logging & transcripts helpers (restored)
+# Logging & transcripts helpers
 # ----------------------------
-
 def _get_log_channel(guild: discord.Guild, cfg: Dict[str, Any]) -> Optional[discord.TextChannel]:
     ch_id = (cfg or {}).get('log_channel_id')
     if not ch_id:
@@ -356,15 +357,16 @@ body {{ font-family: system-ui, sans-serif; margin: 16px; }}
 </head><body>
 <h2>Transcript: #{html.escape(channel.name)}</h2>
 <p>Guild: {html.escape(channel.guild.name)} • Channel ID: {channel.id}</p>
-{''.join(msgs)}
+{"".join(msgs)}
 </body></html>"""
     return html_doc.encode('utf-8')
 
+
 # ----------------------------
-# Cog (extended)
+# Cog (panel + full ops)
 # ----------------------------
 class TicketChannelsCog(commands.Cog):
-    """Ticket panel + creation + restored ops (claim/close/transcript/report/purge)."""
+    """Ticket panel + creation + full operations (claim/unclaim/close/reopen/transcript/report/purge)."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -379,7 +381,7 @@ class TicketChannelsCog(commands.Cog):
         colors = panel.get('colors') or ['#5865F2']
         color_val = parse_hex_color(colors[0] if colors else '#5865F2')
 
-        view = TicketPanelView(self.bot)
+        view = TicketPanelView(self, hub)
         emb = discord.Embed(
             title=str(title)[:256],
             description=str(desc)[:4096],
@@ -389,21 +391,19 @@ class TicketChannelsCog(commands.Cog):
         if image_url:
             emb.set_image(url=image_url)
 
-        # Idempotent panel: edit existing message if stored in config
-panel_cfg = cfg.setdefault('panel', {})
-msg_id = panel_cfg.get('message_id')
-if msg_id:
-    try:
-        msg = await hub.fetch_message(int(msg_id))
-        await msg.edit(embed=emb, view=view)
-    except Exception:
+        # Idempotent panel: update if message_id known; else send and save id
+        panel_cfg = cfg.setdefault('panel', {})
+        msg_id = panel_cfg.get('message_id')
+        if msg_id:
+            try:
+                msg = await hub.fetch_message(int(msg_id))
+                await msg.edit(embed=emb, view=view)
+                return
+            except Exception:
+                pass
         sent = await hub.send(embed=emb, view=view)
         panel_cfg['message_id'] = sent.id
         await save_config(self.bot.config)
-else:
-    sent = await hub.send(embed=emb, view=view)
-    panel_cfg['message_id'] = sent.id
-    await save_config(self.bot.config)
 
     # ---- admin command ----
     @commands.has_permissions(administrator=True)
@@ -476,7 +476,7 @@ else:
         await ctx.send('Usage: `!ticketspanel_chan` | `!ticketspanel_chan create #hub [image_url]` | `!ticketspanel_chan listopts`')
 
     # =========================
-    # Restored commands begin
+    # Ticket operations
     # =========================
     async def _is_staff(self, member: discord.Member) -> bool:
         cfg = tickets_cfg(self.bot)
@@ -556,9 +556,8 @@ else:
         await _log(ctx.guild, cfg, f'🧾 Transcript generated for {ctx.channel.mention}: {msg.jump_url}')
 
     @commands.command(name='ticket_close')
-        @commands.command(name='ticket_close')
     async def ticket_close(self, ctx: commands.Context, *, reason: str = ''):
-        """Close the ticket: transcript, rename, move to archive (if configured)."""
+        """Close the ticket: transcript, rename, move to archive (if configured), cleanup voice channel."""
         if not isinstance(ctx.channel, discord.TextChannel):
             return await ctx.reply('Run this in a ticket text channel.')
         cfg = tickets_cfg(self.bot)
@@ -569,6 +568,7 @@ else:
         is_staff = await self._is_staff(ctx.author)
         if not (is_staff or (allow_user_close and act.get('opener_id') == ctx.author.id)):
             return await ctx.reply('You do not have permission to close this ticket.')
+
         # transcript best-effort
         try:
             data = await _generate_transcript_html(ctx.channel, limit=2000)
@@ -585,6 +585,7 @@ else:
                 if r.get('channel_id') == ctx.channel.id:
                     r['closed_at'] = now_iso()
                     break
+
         # archive handling
         arch_cfg = cfg.get('archive') or {}
         do_archive = bool(arch_cfg.get('enabled', True))
@@ -602,6 +603,7 @@ else:
             await ctx.reply('⚠️ I could not move/rename the channel due to permissions.')
         except Exception:
             pass
+
         # delete orphaned voice channel if any
         vch_id = act.get('voice_channel_id')
         if vch_id:
@@ -611,6 +613,7 @@ else:
                     await vch.delete(reason='Ticket closed; cleaning up voice channel')
                 except Exception:
                     pass
+
         # mark archived
         for r in cfg.get('records', []):
             if r.get('channel_id') == ctx.channel.id:
@@ -619,11 +622,11 @@ else:
         cfg.get('active', {}).pop(str(ctx.channel.id), None)
         await save_config(self.bot.config)
         await ctx.reply('✅ Ticket closed.' + (f' Reason: {reason}' if reason else ''))
-        await _log(ctx.guild, cfg, f'🗄️ Ticket closed: {ctx.channel.mention} by {ctx.author.mention} {' + '"– " + reason if reason else ""' + '})
+        await _log(ctx.guild, cfg, f'🗄️ Ticket closed: {ctx.channel.mention} by {ctx.author.mention} ' + (f'– {reason}' if reason else ''))
 
     @commands.command(name='ticket_reopen')
     async def ticket_reopen(self, ctx: commands.Context):
-        """Reopen a closed ticket: remove archive prefix and move back to parent category if defined for its option."""
+        """Reopen a closed ticket: remove archive prefix and move back to parent category if defined."""
         if not isinstance(ctx.channel, discord.TextChannel):
             return await ctx.reply('Run this in a ticket text channel.')
         cfg = tickets_cfg(self.bot)
@@ -633,12 +636,14 @@ else:
             return await ctx.reply('No ticket record found for this channel.')
         if not await self._is_staff(ctx.author):
             return await ctx.reply('Only staff can reopen tickets.')
+
         # restore name
         arch_cfg = cfg.get('archive') or {}
         prefix = str(arch_cfg.get('rename_prefix') or 'closed-')
         new_name = ctx.channel.name
         if new_name.startswith(prefix):
             new_name = new_name[len(prefix):]
+
         # move back to option parent category if exists
         opt = _option_for_value(cfg, rec.get('category', ''))
         dest_cat = None
@@ -650,15 +655,16 @@ else:
             await ctx.channel.edit(name=new_name[:100], category=dest_cat, reason=f'Reopened by {ctx.author}')
         except Exception:
             pass
-        # mark active
+
+        # mark active (unclaimed by default)
         cfg.setdefault('active', {})[str(ctx.channel.id)] = {
             'opener_id': rec.get('opener_id'),
             'value': rec.get('category'),
             'opened_at': rec.get('opened_at'),
-            'claimed_by': rec.get('claimed_by_id'),
-            'claimed_at': rec.get('claimed_at') or None,
-            'verification': bool((_option_for_value(cfg, rec.get('category', '')) or {}).get('verification', False)),
-            'voice_channel_id': rec.get('voice_channel_id'),
+            'claimed_by': None,
+            'claimed_at': None,
+            'verification': bool((opt or {}).get('verification', False)),
+            'voice_channel_id': None,
         }
         rec['archived'] = False
         rec['closed_at'] = ''
@@ -667,8 +673,6 @@ else:
         await _log(ctx.guild, cfg, f'🔁 Ticket reopened: {ctx.channel.mention} by {ctx.author.mention}')
 
     @commands.has_permissions(manage_messages=True)
-    @commands.command(name='tickets_purge_images')
-        @commands.has_permissions(manage_messages=True)
     @commands.command(name='tickets_purge_images')
     async def tickets_purge_images(self, ctx: commands.Context, scan_limit: Optional[int] = None):
         """Delete recent non-bot messages with attachments in this ticket (preserves transcript files)."""
@@ -679,13 +683,8 @@ else:
         deleted = 0
         async for msg in ctx.channel.history(limit=lim, oldest_first=False):
             if msg.attachments and not msg.author.bot:
-                # Skip transcript files uploaded by staff/bot
-                keep = False
-                for a in msg.attachments:
-                    fn = (a.filename or '').lower()
-                    if fn.startswith('transcript_') and fn.endswith('.html'):
-                        keep = True
-                        break
+                keep = any((a.filename or '').lower().startswith('transcript_') and (a.filename or '').lower().endswith('.html')
+                           for a in msg.attachments)
                 if keep:
                     continue
                 try:
@@ -696,8 +695,10 @@ else:
                     pass
         await ctx.reply(f'🧹 Deleted {deleted} message(s) with attachments in the last {lim} messages.')
 
+    # =========================
+    # Admin helpers & reports
+    # =========================
     @commands.has_permissions(administrator=True)
-    @commands.command(name='tickets_set_log')(administrator=True)
     @commands.command(name='tickets_set_log')
     async def tickets_set_log(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
         """Set the tickets log channel. Usage: !tickets_set_log #channel or run in target channel."""
@@ -764,7 +765,7 @@ else:
     @commands.has_permissions(administrator=True)
     @commands.command(name='tickets_report_xlsx')
     async def tickets_report_xlsx(self, ctx: commands.Context):
-        """Generate an XLSX report if openpyxl is available."""
+        """Generate an XLSX report (if openpyxl is available)."""
         if openpyxl is None:
             return await ctx.reply('openpyxl is not installed on this runtime; use !tickets_report for CSV.')
         cfg = tickets_cfg(self.bot)
@@ -796,15 +797,9 @@ else:
         out.seek(0)
         await ctx.reply(file=discord.File(out, filename=f'tickets_report_{yyyymm()}.xlsx'))
 
+
 # ----------------------------
 # Setup entry point
 # ----------------------------
 async def setup(bot: commands.Bot):
-    cog = TicketChannelsCog(bot)
-    await bot.add_cog(cog)
-    # Register persistent view so the dropdown works across restarts
-    try:
-        bot.add_view(TicketPanelView(bot))
-    except Exception:
-        # Non-fatal; panel will still function for newly posted messages
-        pass
+    await bot.add_cog(TicketChannelsCog(bot))
