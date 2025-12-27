@@ -179,3 +179,72 @@
     "allow_user_close": false
   }
 }
+"categories": [
+  {
+    "key": "age_group",
+    "label": "Age Group",
+    "multi": false,
+    "required": true,
+    "roles": ["18-22", "23-26", "27-29", "30-35", "36-40+"]
+  },
+  {
+    "key": "gender",
+    "label": "Gender",
+    "multi": false,
+    "required": true,
+    "roles": ["female", "male", "non binary", "trans"]
+  },
+  {
+    "key": "location",
+    "label": "Region",
+    "multi": false,
+    "required": true,
+    "roles": ["Africa", "Asia", "Australia", "Europe", "North America", "South America"]
+  },
+  {
+    "key": "interests",
+    "label": "Interests",
+    "multi": true,
+    "required": false,
+    "roles": [
+      "Activities",
+      "Events",
+      "Giveaways",
+      "Movie night",
+      "Partnership ping",
+      "Server updates",
+      "VC ping"
+    ]
+  },
+  {
+    "key": "touch_preferences",
+    "label": "Touch Preferences",
+    "multi": false,
+    "required": true,
+    "roles": ["No touch", "ask to touch", "ok to touch"]
+  },
+  {
+    "key": "favorite_games",
+    "label": "Favorite Games",
+    "multi": true,
+    "required": false,
+    "roles": [
+      "Among us",
+      "BlackJack",
+      "Borderlands 3",
+      "Call of duty",
+      "Fortnite",
+      "Genshin impact",
+      "Minecraft",
+      "Overwatch 2",
+      "Roblox",
+      "Truth or Dare",
+      "Truth or Dare 18+",
+      "Mobile",
+      "Nintendo",
+      "PC",
+      "PlayStation",
+      "Xbox"
+    ]
+  }
+]
