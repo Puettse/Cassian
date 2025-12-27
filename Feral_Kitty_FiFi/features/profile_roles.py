@@ -40,21 +40,21 @@ DEFAULT_CFG: Dict[str, Any] = {
             "key": "gender",
             "label": "Gender",
             "multi": False,
-            "required": False,
+            "required": True,
             "roles": [],  # e.g. [123, 456] or ["Male", "Female"]
         },
         {
             "key": "age_group",
             "label": "Age Group",
             "multi": False,
-            "required": False,
+            "required": True,
             "roles": [],
         },
         {
             "key": "location",
             "label": "Location",
             "multi": False,
-            "required": False,
+            "required": True,
             "roles": [],
         },
         {
@@ -74,8 +74,8 @@ DEFAULT_CFG: Dict[str, Any] = {
         {
             "key": "touch_preferences",
             "label": "Touch Preferences",
-            "multi": True,
-            "required": False,
+            "multi": False,
+            "required": True,
             "roles": [],
         },
     ],
