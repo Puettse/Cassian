@@ -6,9 +6,9 @@ import discord
 from .provision import get_or_create_safe_category, get_or_create_safe_channel, get_or_create_role
 from .config import update_runtime_config, sw_cfg
 from .constants import SAFE_CATEGORY_NAME, SAFE_LOG_CHANNEL_NAME, SAFE_RESPONDERS_ROLE
-from ..utils.perms import staff_check_factory
-from ..utils.io_helpers import aio_retry
-from ..utils.discord_resolvers import resolve_role_any
+from Feral_Kitty_FiFi.utils.perms import staff_check_factory
+from Feral_Kitty_FiFi.utils.io_helpers import aio_retry
+from Feral_Kitty_FiFi.utils.discord_resolvers import resolve_role_any
 from .ui import SafewordConfigView  # <-- ADD THIS IMPORT
 
 def register_commands(cog):
