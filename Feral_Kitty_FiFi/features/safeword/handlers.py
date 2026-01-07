@@ -9,8 +9,8 @@ from .access import member_authorized, member_blocked
 from .exports import export_last_messages_json
 from .channel_lock import lock_channel, unlock_channel, LockSnapshot
 from .constants import STAFF_FALLBACK_NAME
-from ..utils.discord_resolvers import resolve_role_any
-from ..utils.io_helpers import aio_retry
+from Feral_Kitty_FiFi.utils.discord_resolvers import resolve_role_any
+from Feral_Kitty_FiFi.utils.io_helpers import aio_retry
 
 async def handle_safeword(bot, message: discord.Message, last_trigger_at: Dict[int, float], lock_state: Dict[int, LockSnapshot]) -> None:
     cfg = sw_cfg(bot)
