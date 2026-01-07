@@ -2,9 +2,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Any, List, Dict
 import discord
-from ..utils.io_helpers import aio_retry
+from Feral_Kitty_FiFi.utils.io_helpers import aio_retry
 from .constants import STAFF_FALLBACK_NAME
-from ..utils.discord_resolvers import resolve_role_any
+from Feral_Kitty_FiFi.utils.discord_resolvers import resolve_role_any
 
 @dataclass
 class LockSnapshot:
