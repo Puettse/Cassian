@@ -1,7 +1,7 @@
 from typing import Optional
 import discord
-from ..utils.io_helpers import aio_retry
-from ..utils.discord_resolvers import resolve_role_any
+from Feral_Kitty_FiFi.utils.io_helpers import aio_retry
+from Feral_Kitty_FiFi.utils.discord_resolvers import resolve_role_any
 from .constants import SAFE_CATEGORY_NAME, SAFE_LOG_CHANNEL_NAME
 
 async def get_or_create_role(guild: discord.Guild, name: str) -> Optional[discord.Role]:
