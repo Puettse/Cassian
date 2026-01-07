@@ -4,15 +4,37 @@ from discord.ext import commands
 import discord
 
 from .provision import get_or_create_safe_category, get_or_create_safe_channel, get_or_create_role
-from .config import update_runtime_config
+from .config import update_runtime_config, sw_cfg
 from .constants import SAFE_CATEGORY_NAME, SAFE_LOG_CHANNEL_NAME, SAFE_RESPONDERS_ROLE
 from ..utils.perms import staff_check_factory
 from ..utils.io_helpers import aio_retry
 from ..utils.discord_resolvers import resolve_role_any
+from .ui import SafewordConfigView  # <-- ADD THIS IMPORT
 
 def register_commands(cog):
     staff_check = staff_check_factory(lambda: cog.bot.config)
 
+    @cog.command(name="safeconfig", help="Open Safeword config UI (roles/channels + modal).")
+    async def safeconfig_cmd(ctx: commands.Context):
+        # Permissions: Staff or Manage Guild
+        member = ctx.author if isinstance(ctx.author, discord.Member) else None
+        has_manage_guild = bool(getattr(member, "guild_permissions", None) and member.guild_permissions.manage_guild)
+        is_staff = False
+        try:
+            is_staff = bool(staff_check(ctx))
+        except Exception:
+            is_staff = False
+
+        if not (is_staff or has_manage_guild):
+            return await ctx.send("❌ You need **Manage Server** or Staff permission to run this.", delete_after=10)
+
+        # Seed view with current config
+        view = SafewordConfigView(bot=cog.bot, author_id=ctx.author.id, seed=sw_cfg(cog.bot))
+        msg = await ctx.send("🔧 Safeword setup (only you can use this panel):", view=view)
+        # Optional: auto-delete after view timeout to reduce clutter
+        view.message = msg  # keep ref if you later want to edit/delete
+
+    # --- existing commands below (thanos, dropit) ---
     @cog.command(name="thanos")
     async def thanos_cmd(ctx: commands.Context, user_id: int, depth: int = 25):
         if not staff_check(ctx):
