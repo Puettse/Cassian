@@ -3,7 +3,7 @@ from typing import Tuple
 import io, json
 from datetime import datetime, timezone
 import discord
-from ..utils.io_helpers import now_iso
+from Feral_Kitty_FiFi.utils.io_helpers import now_iso
 
 async def export_last_messages_json(channel: discord.TextChannel, limit: int) -> Tuple[str, io.BytesIO]:
     msgs = []
