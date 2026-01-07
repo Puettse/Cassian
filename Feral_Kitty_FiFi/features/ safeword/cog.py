@@ -32,7 +32,13 @@ class Safeword(commands.Cog):
 
 async def setup(bot: commands.Bot):
     cog = Safeword(bot)
-    register_commands(cog)  # attaches thanos & dropit to this cog
+    from .commands import register_commands
+    register_commands(cog)
     await bot.add_cog(cog)
+
+    # Also load slash commands for interactive setup
+    from . import slash as _slash_ext
+    await _slash_ext.setup(bot)
+
 
 
