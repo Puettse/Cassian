@@ -1,7 +1,7 @@
 from typing import Any, List
 import discord
 from .constants import STAFF_FALLBACK_NAME
-from ..utils.discord_resolvers import normalize
+from Feral_Kitty_FiFi.utils.discord_resolvers import normalize
 
 def member_authorized(member: discord.Member, roles_whitelist: List[Any]) -> bool:
     if not roles_whitelist:
