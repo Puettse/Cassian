@@ -7,7 +7,7 @@ from .config import sw_cfg
 from .handlers import handle_safeword, handle_release
 from .commands import register_commands
 from .channel_lock import LockSnapshot
-from ..utils.perms import staff_check_factory
+from Feral_Kitty_FiFi.utils.perms import staff_check_factory
 
 class Safeword(commands.Cog):
     """Safeword handling: !STOP! / !Release, locking, pings, export, thanos."""
