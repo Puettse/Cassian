@@ -1,4 +1,4 @@
-# file: feral_kitty_fifi/features/gimme_report.py
+# file: feral_kitty_fifi/feral_kitty_fifi/features/gimme_report.py
 # Python Cog: Roster/Ban/Leave XLSX report with optional backfill from log channels (Railway-friendly).
 # Deps (pip): discord.py openpyxl
 # Intents needed: Guilds, GuildMembers, GuildMessages, MessageContent, GuildBans
@@ -7,14 +7,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import io
 import os
 import re
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import discord
 from discord.ext import commands
@@ -33,9 +31,13 @@ JOIN_LEAVE_LOG_CHANNEL_IDS: List[int] = [
 
 BAN_LOG_CHANNEL_ID = int(os.getenv("BAN_LOG_CHANNEL_ID", "0"))  # required
 
-BACKFILL_MAX_MESSAGES_PER_CHANNEL = max(1, min(200_000, int(os.getenv("BACKFILL_MAX_MESSAGES_PER_CHANNEL", "50000"))))
+BACKFILL_MAX_MESSAGES_PER_CHANNEL = max(
+    1, min(200_000, int(os.getenv("BACKFILL_MAX_MESSAGES_PER_CHANNEL", "50000")))
+)
 
-DB_PATH = os.getenv("DB_PATH", os.path.join(os.getcwd(), "data", "gimme_report.sqlite"))
+DB_PATH = os.getenv(
+    "DB_PATH", os.path.join(os.getcwd(), "data", "gimme_report.sqlite")
+)
 
 # -------------
 # Misc helpers
@@ -46,13 +48,15 @@ def iso(dt: Optional[datetime | str | float | int]) -> str:
     if isinstance(dt, datetime):
         d = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         return d.isoformat()
+    # try ISO str
     try:
-        d = datetime.fromisoformat(str(dt))
+        d = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
         if d.tzinfo is None:
             d = d.replace(tzinfo=timezone.utc)
         return d.isoformat()
     except Exception:
         pass
+    # try epoch
     try:
         d = datetime.fromtimestamp(float(dt), tz=timezone.utc)
         return d.isoformat()
@@ -63,8 +67,10 @@ def days_between(a: str, b: str) -> str:
     try:
         da = datetime.fromisoformat(a.replace("Z", "+00:00"))
         db = datetime.fromisoformat(b.replace("Z", "+00:00"))
-        if da.tzinfo is None: da = da.replace(tzinfo=timezone.utc)
-        if db.tzinfo is None: db = db.replace(tzinfo=timezone.utc)
+        if da.tzinfo is None:
+            da = da.replace(tzinfo=timezone.utc)
+        if db.tzinfo is None:
+            db = db.replace(tzinfo=timezone.utc)
         return str(max(0, (db - da).days))
     except Exception:
         return ""
@@ -77,27 +83,38 @@ def message_to_searchable_text(m: discord.Message) -> str:
     if m.content:
         parts.append(m.content)
     for e in m.embeds or []:
-        if e.title: parts.append(e.title)
-        if e.description: parts.append(e.description)
-        if e.author and e.author.name: parts.append(e.author.name)
-        if e.footer and e.footer.text: parts.append(e.footer.text)
+        if e.title:
+            parts.append(e.title)
+        if e.description:
+            parts.append(e.description)
+        if e.author and e.author.name:
+            parts.append(e.author.name)
+        if e.footer and e.footer.text:
+            parts.append(e.footer.text)
         for f in getattr(e, "fields", []) or []:
-            if getattr(f, "name", None): parts.append(f.name)
-            if getattr(f, "value", None): parts.append(f.value)
+            if getattr(f, "name", None):
+                parts.append(f.name)
+            if getattr(f, "value", None):
+                parts.append(f.value)
     return normalize_text(" | ".join(filter(None, parts)))
 
 def extract_user_id(text: str) -> Optional[int]:
     m1 = re.search(r"<@!?(?P<id>\d{17,20})>", text)
-    if m1 and m1.group("id"): return int(m1.group("id"))
+    if m1 and m1.group("id"):
+        return int(m1.group("id"))
     m2 = re.search(r"\b(?P<id>\d{17,20})\b", text)
-    if m2 and m2.group("id"): return int(m2.group("id"))
+    if m2 and m2.group("id"):
+        return int(m2.group("id"))
     return None
 
 def detect_event_type(text: str) -> Optional[str]:
     t = text.lower()
-    if re.search(r"\b(banned|ban)\b", t): return "ban"
-    if re.search(r"\b(left|leave|removed)\b", t): return "leave"
-    if re.search(r"\b(joined|join)\b", t): return "join"
+    if re.search(r"\b(banned|ban)\b", t):
+        return "ban"
+    if re.search(r"\b(left|leave|removed)\b", t):
+        return "leave"
+    if re.search(r"\b(joined|join)\b", t):
+        return "join"
     return None
 
 def extract_reason(text: str) -> Optional[str]:
@@ -186,7 +203,7 @@ class DbApi:
         cur = self.db.execute("SELECT DISTINCT user_id FROM events")
         return [r[0] for r in cur.fetchall()]
 
-    def list_events_by_user(self, user_id: str) -> List[Tuple[str, str, str, str]]:
+    def list_events_by_user(self, user_id: str) -> List[Tuple[str, str, str, str, str]]:
         cur = self.db.execute(
             """
             SELECT user_id, COALESCE(username, user_id) AS username, event_type, ts, COALESCE(reason,'')
@@ -240,7 +257,6 @@ def build_periods(db: DbApi) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]
                     ban_periods.append(period)
                 current_join = None
 
-    # Most recent first
     left_periods.sort(key=lambda p: p["date_left"], reverse=True)
     ban_periods.sort(key=lambda p: p["date_left"], reverse=True)
     return left_periods, ban_periods
@@ -255,12 +271,12 @@ def build_workbook(role_list: List[Tuple[int, str]], members: Iterable[discord.M
     wb_add_header(ws1, base_headers + role_headers)
 
     for m in members:
-        user = m._user if hasattr(m, "_user") else m.guild.get_member(m.id).user if hasattr(m, "guild") else m
-        username = f"{user.name}#{user.discriminator}" if getattr(user, "discriminator", "0") != "0" else user.name
+        user = m._user if hasattr(m, "_user") else m.guild.get_member(m.id).user if hasattr(m, "guild") else m  # fallback
+        uname = f"{user.name}#{user.discriminator}" if getattr(user, "discriminator", "0") != "0" else user.name
         row = [
             iso(getattr(user, "created_at", None)),
             iso(getattr(m, "joined_at", None)),
-            username,
+            uname,
             str(user.id),
         ]
         member_role_ids = {r.id for r in getattr(m, "roles", [])}
@@ -269,7 +285,7 @@ def build_workbook(role_list: List[Tuple[int, str]], members: Iterable[discord.M
 
         # Best-effort backfill into DB
         try:
-            db.upsert_user(user.id, username, iso(getattr(user, "created_at", None)))
+            db.upsert_user(user.id, uname, iso(getattr(user, "created_at", None)))
         except Exception:
             pass
 
@@ -287,7 +303,6 @@ def build_workbook(role_list: List[Tuple[int, str]], members: Iterable[discord.M
     for p in left_periods:
         ws3.append([p["username"], p["user_id"], p["date_joined"], p["date_left"], p["total_days"]])
 
-    # Save to bytes
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -296,33 +311,24 @@ def build_workbook(role_list: List[Tuple[int, str]], members: Iterable[discord.M
 # ------------------------
 # Backfill implementation
 # ------------------------
-async def fetch_all_messages_chrono(channel: discord.TextChannel, max_messages: int) -> List[discord.Message]:
+TextLikeChannel = Union[discord.TextChannel, discord.Thread]
+
+async def fetch_all_messages_chrono(channel: TextLikeChannel, max_messages: int) -> List[discord.Message]:
     """Fetch up to max_messages messages, returning oldest->newest."""
     out: List[discord.Message] = []
-    before: Optional[discord.Message] = None
-    while len(out) < max_messages:
-        remaining = max_messages - len(out)
-        limit = min(100, remaining)
-        batch = [m async for m in channel.history(limit=limit, before=before)]
-        if not batch:
+    async for m in channel.history(limit=max_messages, oldest_first=True):
+        out.append(m)
+        if len(out) >= max_messages:
             break
-        out.extend(batch)
-        before = batch[-1]
-        if len(batch) < limit:
-            break
-    out.reverse()  # newest->oldest -> oldest->newest
     return out
 
-async def fetch_after_chrono(channel: discord.TextChannel, after_id: int, max_messages: int) -> List[discord.Message]:
-    out: List[discord.Message] = []
+async def fetch_after_chrono(channel: TextLikeChannel, after_id: int, max_messages: int) -> List[discord.Message]:
     after_obj = discord.Object(id=after_id)
-    # discord.py returns newest->oldest; we'll buffer and reverse
-    buffer: List[discord.Message] = []
+    out: List[discord.Message] = []
     async for m in channel.history(limit=max_messages, after=after_obj, oldest_first=True):
-        buffer.append(m)
-        if len(buffer) >= max_messages:
+        out.append(m)
+        if len(out) >= max_messages:
             break
-    out = buffer  # already oldest_first=True
     return out
 
 def parse_log_message(msg: discord.Message, forced_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -351,49 +357,61 @@ async def backfill_from_log_channel(
     db: DbApi,
     max_messages: int,
 ) -> Tuple[int, int]:
-    channel = guild.get_channel(channel_id) or await guild.fetch_channel(channel_id)
-    if not isinstance(channel, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+    channel = guild.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await guild.fetch_channel(channel_id)  # type: ignore
+        except Exception:
+            return (0, 0)
+
+    # Only handle text channels and threads
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
         return (0, 0)
-    # For threads/forum, use text-like fetch if possible
-    if hasattr(channel, "history"):
-        meta_key = f"last_message_id:{channel_id}"
-        last_id = db.get_meta(meta_key)
-        messages: List[discord.Message] = []
+
+    meta_key = f"last_message_id:{channel_id}"
+    last_id = db.get_meta(meta_key)
+    messages: List[discord.Message] = []
+    try:
         if last_id:
             messages = await fetch_after_chrono(channel, int(last_id), max_messages)
         else:
             messages = await fetch_all_messages_chrono(channel, max_messages)
+    except Exception:
+        messages = []
 
-        inserted = 0
-        for m in messages:
-            evt = parse_log_message(m, forced_type)
-            if not evt:
-                continue
-            try:
-                inserted += db.insert_event(
-                    evt["message_id"],
-                    evt["channel_id"],
-                    evt["user_id"],
-                    evt["username"],
-                    evt["event_type"],
-                    evt["ts"],
-                    evt["reason"],
-                )
-            except Exception:
-                pass
+    inserted = 0
+    for m in messages:
+        evt = parse_log_message(m, forced_type)
+        if not evt:
+            continue
+        try:
+            inserted += db.insert_event(
+                evt["message_id"],
+                evt["channel_id"],
+                evt["user_id"],
+                evt["username"],
+                evt["event_type"],
+                evt["ts"],
+                evt["reason"],
+            )
+        except Exception:
+            pass
 
-        if messages:
-            newest_id = messages[-1].id
-            db.set_meta(meta_key, str(newest_id))
+    if messages:
+        newest_id = messages[-1].id
+        db.set_meta(meta_key, str(newest_id))
 
-        return (len(messages), inserted)
-
-    return (0, 0)
+    return (len(messages), inserted)
 
 # -----------
 # The Cog
 # -----------
 class GimmeReport(commands.Cog):
+    """Generates an XLSX roster report and backfills join/leave/ban events from log channels.
+
+    Trigger: send the exact text defined in TRIGGER (default '!gimme') in any guild text channel.
+    """
+
     def __init__(
         self,
         bot: commands.Bot,
@@ -413,25 +431,21 @@ class GimmeReport(commands.Cog):
         self.backfill_max = backfill_max_messages_per_channel
         self.db = DbApi(db_path)
 
-        # live tracking
-        self.bot.add_listener(self._on_guild_member_add, "on_member_join")
-        self.bot.add_listener(self._on_guild_member_remove, "on_member_remove")
-        self.bot.add_listener(self._on_guild_ban_add, "on_guild_ban")
-
     def cog_unload(self):
         self.db.close()
 
     # ----- live tracking (best-effort) -----
-    async def _on_guild_member_add(self, member: discord.Member):
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
         try:
             user = member._user if hasattr(member, "_user") else member.guild.get_member(member.id).user
-            username = f"{user.name}#{user.discriminator}" if getattr(user, "discriminator", "0") != "0" else user.name
-            self.db.upsert_user(user.id, username, iso(getattr(user, "created_at", None)))
+            uname = f"{user.name}#{user.discriminator}" if getattr(user, "discriminator", "0") != "0" else user.name
+            self.db.upsert_user(user.id, uname, iso(getattr(user, "created_at", None)))
             self.db.insert_event(
                 f"live:join:{member.guild.id}:{user.id}:{int(discord.utils.utcnow().timestamp()*1000)}",
                 "live",
                 user.id,
-                username,
+                uname,
                 "join",
                 iso(getattr(member, "joined_at", discord.utils.utcnow())),
                 None,
@@ -439,18 +453,23 @@ class GimmeReport(commands.Cog):
         except Exception:
             pass
 
-    async def _on_guild_member_remove(self, member: discord.Member):
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
         try:
-            user = member._user if hasattr(member, "_user") else member._user if hasattr(member, "_user") else discord.Object(id=member.id)
-            username = getattr(getattr(member, "name", None), "__str__", lambda: None)() or getattr(member, "display_name", None) or str(member.id)
-            if isinstance(user, discord.User) or isinstance(user, discord.Member):
-                uname = f"{user.name}#{user.discriminator}" if getattr(user, "discriminator", "0") != "0" else getattr(user, "name", str(member.id))
-                self.db.upsert_user(getattr(user, "id", member.id), uname, iso(getattr(user, "created_at", None)))
+            # We may not have the full User object here depending on cache.
+            u = getattr(member, "_user", None) or getattr(member, "user", None)
+            if isinstance(u, (discord.User, discord.Member)):
+                uname = f"{u.name}#{u.discriminator}" if getattr(u, "discriminator", "0") != "0" else u.name
+                self.db.upsert_user(u.id, uname, iso(getattr(u, "created_at", None)))
                 username = uname
+                uid = u.id
+            else:
+                username = str(member.id)
+                uid = member.id
             self.db.insert_event(
                 f"live:leave:{member.guild.id}:{member.id}:{int(discord.utils.utcnow().timestamp()*1000)}",
                 "live",
-                member.id,
+                uid,
                 username,
                 "leave",
                 iso(discord.utils.utcnow()),
@@ -459,11 +478,12 @@ class GimmeReport(commands.Cog):
         except Exception:
             pass
 
-    async def _on_guild_ban_add(self, guild: discord.Guild, user: discord.User):
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User):
         try:
-            # audit log reason (optional; requires permission)
             reason = None
             try:
+                # Requires "View Audit Log" permission to enrich reason
                 async for entry in guild.audit_logs(limit=6, action=discord.AuditLogAction.ban):
                     if entry.target and entry.target.id == user.id:
                         reason = entry.reason
@@ -494,7 +514,7 @@ class GimmeReport(commands.Cog):
             if message.content.strip() != self.trigger:
                 return
 
-            # backfill from logs
+            # Backfill from logs
             for cid in self.join_leave_log_channel_ids:
                 try:
                     await backfill_from_log_channel(
@@ -511,30 +531,41 @@ class GimmeReport(commands.Cog):
                 except Exception:
                     pass
 
-            # ensure member cache
-            await message.guild.chunk()  # populate cache
-            members = [m for m in message.guild.members if not getattr(m, "bot", False)]
+            # Ensure member cache
+            try:
+                await message.guild.fetch_members(limit=None).flatten()  # type: ignore[attr-defined]
+                members_iter: Iterable[discord.Member] = message.guild.members
+            except Exception:
+                # Fallback: use cached members only
+                members_iter = [m for m in message.guild.members if not getattr(m, "bot", False)]
 
-            # roles list (exclude @everyone)
-            roles = sorted(
-                [(r.id, r.name) for r in message.guild.roles if not r.is_default()],
-                key=lambda x: next((rr.position for rr in message.guild.roles if rr.id == x[0]), 0),
+            # Role list (exclude @everyone), sorted by position desc
+            roles_sorted = sorted(
+                [r for r in message.guild.roles if not r.is_default()],
+                key=lambda r: r.position,
                 reverse=True,
             )
-            # ensure unique role names for columns
+            roles_pairs: List[Tuple[int, str]] = []
             seen: Dict[str, int] = {}
-            role_list: List[Tuple[int, str]] = []
-            for rid, name in roles:
-                count = seen.get(name, 0) + 1
-                seen[name] = count
-                role_list.append((rid, f"{name} ({count})" if count > 1 else name))
+            for r in roles_sorted:
+                count = seen.get(r.name, 0) + 1
+                seen[r.name] = count
+                name = f"{r.name} ({count})" if count > 1 else r.name
+                roles_pairs.append((r.id, name))
 
-            # build workbook
-            xlsx_bytes = build_workbook(role_list, members, self.db)
+            # Build workbook bytes
+            xlsx_bytes = build_workbook(roles_pairs, members_iter, self.db)
 
-            # resolve report channel
-            report_ch = message.guild.get_channel(self.report_channel_id)
-            if not isinstance(report_ch, (discord.TextChannel, discord.Thread, discord.ForumChannel)):
+            # Resolve report channel
+            report_ch = None
+            if REPORT_CHANNEL_ID:
+                report_ch = message.guild.get_channel(REPORT_CHANNEL_ID)
+                if report_ch is None:
+                    try:
+                        report_ch = await message.guild.fetch_channel(REPORT_CHANNEL_ID)
+                    except Exception:
+                        report_ch = None
+            if not isinstance(report_ch, (discord.TextChannel, discord.Thread)):
                 report_ch = message.channel  # fallback to invoking channel
 
             await report_ch.send(
@@ -548,7 +579,7 @@ class GimmeReport(commands.Cog):
                 pass
 
 # -----------
-# Extension
+# Extension hook
 # -----------
 async def setup(bot: commands.Bot):
     bot.add_cog(
