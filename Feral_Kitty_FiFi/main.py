@@ -33,6 +33,7 @@ EXTENSIONS = [
     "Feral_Kitty_FiFi.features.channel_builder",
     "Feral_Kitty_FiFi.features.tickets_channels",
     "Feral_Kitty_FiFi.features.profile_roles"
+    "Feral_Kitty_FiFi.features.gimme_report"
 ]
 
 @bot.event
