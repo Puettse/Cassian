@@ -1,6 +1,6 @@
 # feral_kitty_fifi/features/safeword.py
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, List, Tuple
 import io, json, asyncio
 from datetime import datetime, timezone
@@ -14,6 +14,8 @@ from ..utils.perms import can_manage_role, staff_check_factory
 class LockSnapshot:
     prior_send_everyone: Optional[bool]
     prior_slowmode: Optional[int]
+    # role_id -> prior send_messages (True/False/None if not explicitly set)
+    touched_roles: Dict[int, Optional[bool]] = field(default_factory=dict)
 
 SAFE_CATEGORY_NAME = "SAFE"
 SAFE_LOG_CHANNEL_NAME = "SAFEWORD"
@@ -74,16 +76,24 @@ class Safeword(commands.Cog):
     async def _lock_channel(self, channel: discord.TextChannel, roles_whitelist: List[Any]) -> Optional[str]:
         guild = channel.guild
         everyone = guild.default_role
-        prior = channel.overwrites_for(everyone).send_messages
+        prior_everyone = channel.overwrites_for(everyone).send_messages
         prior_slow = channel.slowmode_delay
-        self._lock_state[channel.id] = LockSnapshot(prior_send_everyone=prior, prior_slowmode=prior_slow)
+        touched: Dict[int, Optional[bool]] = {}
         try:
             await aio_retry(lambda: channel.set_permissions(everyone, send_messages=False, reason="Safeword lock"), ctx="lock-deny")
             for token in roles_whitelist or []:
                 role = resolve_role_any(guild, token)
                 if role:
+                    prior_role_send = channel.overwrites_for(role).send_messages
+                    touched[role.id] = prior_role_send
                     await aio_retry(lambda r=role: channel.set_permissions(r, send_messages=True, reason="Safeword whitelist"), ctx="lock-allow")
             await aio_retry(lambda: channel.edit(slowmode_delay=1800, reason="Safeword 30m slowmode"), ctx="lock-slowmode")
+            # store snapshot after successful mutations
+            self._lock_state[channel.id] = LockSnapshot(
+                prior_send_everyone=prior_everyone,
+                prior_slowmode=prior_slow,
+                touched_roles=touched
+            )
             return None
         except Exception:
             return "lock-error"
@@ -91,17 +101,32 @@ class Safeword(commands.Cog):
     async def _unlock_channel(self, channel: discord.TextChannel) -> Optional[str]:
         guild = channel.guild
         everyone = guild.default_role
-        snap = self._lock_state.get(channel.id, LockSnapshot(prior_send_everyone=None, prior_slowmode=0))
+        snap = self._lock_state.get(channel.id, LockSnapshot(prior_send_everyone=None, prior_slowmode=0, touched_roles={}))
         try:
             await aio_retry(lambda: channel.edit(slowmode_delay=snap.prior_slowmode or 0, reason="Safeword release"), ctx="unlock-slowmode")
-            await aio_retry(lambda: channel.set_permissions(everyone, overwrite=None), ctx="unlock-clear")
+            # precisely restore @everyone.send_messages (None clears explicit override)
+            await aio_retry(lambda: channel.set_permissions(
+                everyone,
+                send_messages=snap.prior_send_everyone,
+                reason="Safeword release"
+            ), ctx="unlock-restore-everyone")
+            # restore/clear touched role overwrites
+            for rid, prior in (snap.touched_roles or {}).items():
+                role = guild.get_role(rid)
+                if not role:
+                    continue
+                await aio_retry(lambda r=role: channel.set_permissions(
+                    r,
+                    send_messages=prior,  # None clears explicit override
+                    reason="Safeword release"
+                ), ctx="unlock-restore-role")
             self._lock_state.pop(channel.id, None)
             return None
         except Exception:
             return "unlock-error"
 
     # ---------------------------
-    # Provisioning helpers
+       # Provisioning helpers
     # ---------------------------
     async def _get_or_create_role(self, guild: discord.Guild, name: str) -> Optional[discord.Role]:
         role = discord.utils.get(guild.roles, name=name)
@@ -205,7 +230,7 @@ class Safeword(commands.Cog):
                 return
         except Exception:
             pass
-        
+
     async def _handle_safeword(self, message: discord.Message) -> None:
         cfg = self._sw_cfg()
         ch = message.channel
